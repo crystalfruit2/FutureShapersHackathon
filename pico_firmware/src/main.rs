@@ -1,8 +1,10 @@
 #![no_std]
 #![no_main]
+extern crate alloc;
 
 mod state;
 mod lcd;
+mod telemetry;
 
 use defmt_rtt as _;
 use panic_probe as _;
@@ -40,4 +42,7 @@ async fn main(spawner: Spawner) {
     let scl = p.PIN_17;
     let i2c = I2c::new_async(p.I2C0, scl, sda, Irqs, Config::default());
     spawner.spawn(lcd::display_task(i2c).unwrap());
+
+    // Setup telemetry broker
+    spawner.spawn(telemetry::gather().unwrap());
 }

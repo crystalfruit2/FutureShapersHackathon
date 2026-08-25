@@ -1,12 +1,18 @@
 //! LCD control
 
+use core::fmt::Write;
+
 use embassy_rp::i2c::{I2c, Async};
 use embassy_rp::peripherals::I2C0;
 
 use embassy_time::{Delay, Timer};
 
+use heapless::String;
+
 use hd44780_driver::{Cursor, CursorBlink, HD44780};
 use hd44780_driver::bus::I2CBus;
+
+use crate::telemetry::TELEMETRY;
 
 /// i2c address of the display
 const ADDR: u8 = 0x27;
@@ -44,6 +50,25 @@ async fn write_line(
     lcd.write_str(text, delay).unwrap();
 }
 
+async fn display_gas(
+    lcd: &mut HD44780<I2CBus<I2c<'static, I2C0, Async>>>,
+    delay: &mut Delay
+) {
+    write_line(DisplayLine::Top, "Gas Level:", lcd, delay).await;
+    let level = {
+        let t = TELEMETRY.lock().await;
+        t.gas
+    };
+
+    if level.is_none() {
+        write_line(DisplayLine::Bottom, "---", lcd, delay).await;
+    } else {
+        let mut string: String<32> = String::new();
+        write!(string, "{}", level.unwrap()).unwrap();
+        write_line(DisplayLine::Bottom, string.as_str(), lcd, delay).await;
+    }
+}
+
 #[embassy_executor::task]
 pub async fn display_task(i2c: I2c<'static, I2C0, Async>) {
     // initial setup
@@ -61,4 +86,9 @@ pub async fn display_task(i2c: I2c<'static, I2C0, Async>) {
     lcd.write_str("Welcome!", &mut delay).unwrap();
     Timer::after_secs(2).await;
     lcd.clear(&mut delay).unwrap();
+
+    loop {
+        display_gas(&mut lcd, &mut delay).await;
+        Timer::after_secs(2).await;
+    }
 }
