@@ -112,11 +112,11 @@ class SimBadge extends StatelessWidget {
 
 /// Human copy for protocol event types — the farmer never reads EVT| lines.
 String humanEvent(String type) => switch (type) {
-      'GAS_CRITICAL' => 'Methane critical in the manure pit',
-      'GAS_HIGH' => 'Methane rising in the manure pit',
-      'GAS_CLEARED' => 'Manure pit air is clear again',
-      'FLAME_DETECTED' => 'Flame detected in the feed store',
-      'INTRUDER' => 'Movement detected at the perimeter',
+      'GAS_CRITICAL' => 'Methane critical in the poultry hall',
+      'GAS_HIGH' => 'Methane rising in the poultry hall',
+      'GAS_CLEARED' => 'Air is clear again',
+      'FLAME_DETECTED' => 'Fire detected in the storage room',
+      'INTRUDER' => 'Movement detected in the field',
       'CABINET_OPENED' => 'Control cabinet was opened',
       'DISTRESS_SOUND' => 'Unusual noise in the poultry hall',
       'WATER_LOW' => 'Drinking water running low',

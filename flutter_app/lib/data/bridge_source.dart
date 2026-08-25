@@ -32,10 +32,13 @@ class BridgeDataSource implements StrajerDataSource {
         if (res.statusCode != 200) throw Exception('HTTP ${res.statusCode}');
         _ctrl.add(ConnMsg(true, 'Connected to farm node'));
         _backoffSec = 1;
-        // SSE: lines "data: {json}\n\n"
+        // SSE: lines "data: {json}\n\n". The bridge ticks ~1 Hz, so >12 s of
+        // silence means the link is dead even if TCP never noticed — force
+        // the reconnect path instead of freezing on stale "Live" data.
         await for (final line in res.stream
             .transform(utf8.decoder)
-            .transform(const LineSplitter())) {
+            .transform(const LineSplitter())
+            .timeout(const Duration(seconds: 12))) {
           if (!line.startsWith('data: ')) continue;
           _handle(jsonDecode(line.substring(6)) as Map<String, dynamic>);
         }
@@ -51,10 +54,18 @@ class BridgeDataSource implements StrajerDataSource {
     }
   }
 
+  Telemetry _telFromBridge(Map<String, dynamic> tel) => Telemetry.fromWire({
+        for (final e in tel.entries)
+          e.key: (
+            v: ((e.value as Map)['v'] as num).toDouble(),
+            sim: (e.value as Map)['sim'] == true
+          )
+      });
+
   void _handle(Map<String, dynamic> m) {
     switch (m['type']) {
       case 'tel':
-        _ctrl.add(TelMsg(Telemetry.fromBridge(m['tel'] as Map<String, dynamic>)));
+        _ctrl.add(TelMsg(_telFromBridge(m['tel'] as Map<String, dynamic>)));
       case 'state':
         _ctrl.add(ModeMsg(modeFrom(m['mode'] as String)));
       case 'event':
@@ -68,7 +79,7 @@ class BridgeDataSource implements StrajerDataSource {
         final st = m['state'] as Map<String, dynamic>?;
         if (st?['mode'] != null) _ctrl.add(ModeMsg(modeFrom('${st!['mode']}')));
         if (st?['tel'] is Map && (st!['tel'] as Map).isNotEmpty) {
-          _ctrl.add(TelMsg(Telemetry.fromBridge(st['tel'] as Map<String, dynamic>)));
+          _ctrl.add(TelMsg(_telFromBridge(st['tel'] as Map<String, dynamic>)));
         }
         for (final e in (m['events'] as List? ?? [])) {
           _ctrl.add(EventMsg(
@@ -86,7 +97,12 @@ class BridgeDataSource implements StrajerDataSource {
               body: jsonEncode(body))
           .timeout(const Duration(seconds: 5));
     } catch (e) {
-      _ctrl.add(ConnMsg(false, 'Command failed — $e'));
+      // a failed POST is not a dead stream — report it as an event, not as
+      // connection state (one Wi-Fi hiccup must not flag the app "Offline")
+      final n = DateTime.now();
+      String p(int x) => x.toString().padLeft(2, '0');
+      _ctrl.add(EventMsg(StrajerEvent('DASH|COMMAND_FAILED|retry',
+          '${p(n.hour)}:${p(n.minute)}:${p(n.second)}', Severity.warn)));
     }
   }
 

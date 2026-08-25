@@ -9,6 +9,7 @@ import 'data/fake_source.dart';
 import 'data/source.dart';
 import 'models.dart';
 import 'ui/controls_screen.dart';
+import 'ui/forecast_screen.dart';
 import 'ui/emergency_overlay.dart';
 import 'ui/events_screen.dart';
 import 'ui/home_screen.dart';
@@ -31,6 +32,12 @@ class AppState extends ChangeNotifier {
   bool usingBridge = false;
   String bridgeUrl = 'http://192.168.1.20:5001';
   bool emergencyAcked = false;
+  bool sceneRunning = false;
+  int pinFails = 0;
+  DateTime? pinLockUntil;
+  String _ackedEmergKey = ''; // zone+type that was acknowledged
+  DateTime _lastEmergSound = DateTime.fromMillisecondsSinceEpoch(0);
+  Timer? _secTimer;
   StrajerEvent? lastSec; // latest cyber event, for the toast
 
   AppState() {
@@ -49,6 +56,8 @@ class AppState extends ChangeNotifier {
     _source = s;
     events.clear();
     audit = [];
+    tel = const Telemetry({});
+    mode = FarmMode.unknown;
     _sub = s.messages.listen(_onMsg);
     s.start();
     notifyListeners();
@@ -76,21 +85,30 @@ class AppState extends ChangeNotifier {
         mode = m.mode;
         if (mode == FarmMode.emergency && was != FarmMode.emergency) {
           emergencyAcked = false;
+          _ackedEmergKey = '';
           HapticFeedback.heavyImpact();
         }
       case EventMsg():
         events.insert(0, m.event);
-        if (events.length > 200) events.removeLast();
+        if (events.length > 400) events.removeLast();
         if (!m.history) {
           if (m.event.sev == Severity.emerg) {
-            emergencyAcked = false;
-            HapticFeedback.heavyImpact();
-            SystemSound.play(SystemSoundType.alert);
+            // a NEW kind of emergency re-raises the acked overlay; the same
+            // one re-emitted does not (that was the can't-exit bug)
+            final key = '${m.event.zone}|${m.event.type}';
+            if (key != _ackedEmergKey) emergencyAcked = false;
+            if (DateTime.now().difference(_lastEmergSound).inSeconds >= 10) {
+              _lastEmergSound = DateTime.now();
+              HapticFeedback.heavyImpact();
+              SystemSound.play(SystemSoundType.alert);
+            }
           } else if (m.event.sev == Severity.alert) {
             HapticFeedback.mediumImpact();
           } else if (m.event.sev == Severity.sec) {
             lastSec = m.event;
             HapticFeedback.selectionClick();
+            _secTimer?.cancel();
+            _secTimer = Timer(const Duration(seconds: 6), clearSecToast);
           }
         }
       case AuditMsg():
@@ -104,6 +122,10 @@ class AppState extends ChangeNotifier {
 
   void ackEmergency() {
     emergencyAcked = true;
+    final lastEmerg =
+        events.where((e) => e.sev == Severity.emerg).firstOrNull;
+    _ackedEmergKey =
+        lastEmerg == null ? '' : '${lastEmerg.zone}|${lastEmerg.type}';
     notifyListeners();
   }
 
@@ -113,11 +135,96 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> command(String a) async => _source?.command(a);
+
+  String get _timeNow {
+    final n = DateTime.now();
+    String p(int x) => x.toString().padLeft(2, '0');
+    return '${p(n.hour)}:${p(n.minute)}:${p(n.second)}';
+  }
+
+  void _localEvent(String raw, Severity sev) {
+    events.insert(0, StrajerEvent(raw, _timeNow, sev));
+    notifyListeners();
+  }
+
+  /// App-side auth layer: disarming needs the user PIN (arming does not).
+  /// PIN mirrors the panel code. 3 misses -> 30 s local lockout.
+  static const _pin = [1, 3, 2, 4];
+  PinResult tryDisarm(List<int> digits) {
+    if (pinLockUntil != null && DateTime.now().isBefore(pinLockUntil!)) {
+      return PinResult.locked;
+    }
+    if (digits.length == 4 &&
+        List.generate(4, (i) => digits[i] == _pin[i]).every((x) => x)) {
+      pinFails = 0;
+      pinLockUntil = null;
+      command('DISARM');
+      _localEvent('EVT|0|ctrl|PIN_OK_DISARMED|0|INFO', Severity.info);
+      return PinResult.ok;
+    }
+    pinFails++;
+    _localEvent('EVT|0|ctrl|PIN_FAIL|$pinFails|WARN', Severity.warn);
+    if (pinFails >= 3) {
+      pinLockUntil = DateTime.now().add(const Duration(seconds: 30));
+      pinFails = 0;
+      _localEvent('SEC|APP_PIN_LOCKOUT|30s', Severity.sec);
+      return PinResult.locked;
+    }
+    return PinResult.wrong;
+  }
+
+  /// Demo director: one tap = one rehearsed pitch scene, correct timing.
+  /// Works identically in Demo and Live mode (routes through the source).
+  Future<void> runScene(int n) async {
+    if (sceneRunning) return;
+    sceneRunning = true;
+    notifyListeners();
+    Future<void> wait(int s) => Future.delayed(Duration(seconds: s));
+    try {
+      switch (n) {
+        case 1: // central control: mode round-trip
+          await command('ARM');
+          await wait(3);
+          await command('DISARM');
+          await wait(2);
+          await command('VENT');
+        case 2: // energy: ammonia rise -> auto ventilation -> recover
+          await simulate('nh3', 32);
+          await wait(6);
+          await simulate('nh3', 8);
+          await wait(3);
+          await command('FAN_OFF');
+        case 3: // security: night watch -> intruder
+          await command('ARM');
+          await wait(2);
+          await simulate('mot', 1);
+          await wait(4);
+          await simulate('mot', 0);
+        case 4: // life safety + cyber: gas emergency -> recover -> attack -> audit
+          for (final v in [300, 500, 750, 900]) {
+            await simulate('gas', v);
+            await wait(2);
+          }
+          await wait(4);
+          for (final v in [500, 300, 150]) {
+            await simulate('gas', v);
+            await wait(2);
+          }
+          await replayAttack();
+          await wait(2);
+          await command('DUMPLOG');
+      }
+    } finally {
+      sceneRunning = false;
+      notifyListeners();
+    }
+  }
   Future<void> simulate(String n, num v) async => _source?.simulate(n, v);
   Future<void> replayAttack() async => _source?.replayAttack();
 
   @override
   void dispose() {
+    _secTimer?.cancel();
     _sub?.cancel();
     _source?.dispose();
     super.dispose();
@@ -157,6 +264,7 @@ class _ShellState extends State<Shell> {
         body: IndexedStack(index: _tab, children: const [
           HomeScreen(),
           EventsScreen(),
+          ForecastScreen(),
           ControlsScreen(),
         ]),
         bottomNavigationBar: NavigationBar(
@@ -167,7 +275,8 @@ class _ShellState extends State<Shell> {
           height: 64,
           destinations: const [
             NavigationDestination(icon: Icon(Icons.grid_view_rounded), label: 'Farm'),
-            NavigationDestination(icon: Icon(Icons.receipt_long_outlined), label: 'Activity'),
+            NavigationDestination(icon: Icon(Icons.query_stats_rounded), label: 'Activity'),
+            NavigationDestination(icon: Icon(Icons.online_prediction_rounded), label: 'Forecast'),
             NavigationDestination(icon: Icon(Icons.tune_rounded), label: 'Controls'),
           ],
         ),
@@ -177,3 +286,5 @@ class _ShellState extends State<Shell> {
     ]);
   }
 }
+
+enum PinResult { ok, wrong, locked }

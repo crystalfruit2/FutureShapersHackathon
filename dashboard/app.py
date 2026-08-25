@@ -34,7 +34,7 @@ def mac_for(counter: int, action: str) -> int:
 
 LOG_TYPES = {1:"BOOT",2:"MODE",3:"GAS",4:"INTRUDER",5:"TAMPER",
              6:"PIN_FAIL",7:"LOCKDOWN",8:"CMD_REJECT",9:"DISARM"}
-KNOWN_UP = ("EVT|","TEL|","STATE|","SEC|","ACK|","NAK|","LOG|")
+KNOWN_UP = ("EVT|","TEL|","STATE|","SEC|","ACK|","NAK|","LOG|","AI|")
 
 # ── shared state ─────────────────────────────────────────────────────────
 state = {"mode":"?", "tel":{}, "log":[]}
@@ -84,12 +84,13 @@ def handle_line(line: str, from_serial=False):
             except ValueError: pass
         state["tel"] = tel
         publish({"type":"tel", "tel":tel})
+        analyst.ingest(tel)          # Tier-2 perception layer (advisory only)
     elif parts[0] == "STATE" and len(parts) > 1:
         state["mode"] = parts[1]
         publish({"type":"state", "mode":parts[1]})
-    elif parts[0] in ("EVT","SEC","ACK","NAK"):
+    elif parts[0] in ("EVT","SEC","ACK","NAK","AI"):
         ev = {"raw":line, "t":now_t(),
-              "sev": parts[5] if parts[0]=="EVT" and len(parts)>5 else
+              "sev": parts[5] if parts[0] in ("EVT","AI") and len(parts)>5 else
                      ("SEC" if parts[0]=="SEC" else "INFO")}
         events.append(ev)
         publish({"type":"event", "event":ev})
@@ -172,8 +173,28 @@ def script_night_intruder():
 def script_flame():
     send_raw("SIM|flame=1"); time.sleep(5); send_raw("SIM|flame=0")
 
+def script_slow_creep():
+    """The AI money shot: a leak too slow for a fixed threshold to see coming.
+    Gas walks 120 -> 720 over ~72 s. The reflex layer only fires at 700; the
+    analyst forecasts the crossing ~60 s earlier."""
+    v = 120
+    while v < 720:
+        send_raw(f"SIM|gas={v}"); v += 20; time.sleep(2.5)
+    time.sleep(6)
+    send_raw("SIM|gas=120")
+
+def script_nh3_drift():
+    """Slow drift the fixed threshold NEVER sees: NH3 creeps 8 -> 22 ppm and
+    stops below the 25 ppm limit. Only the learned baseline catches it.
+    Requires the baseline to be learned first (watch the AI panel)."""
+    for v in range(8, 23):
+        send_raw(f"SIM|nh3={v}"); time.sleep(4)
+    time.sleep(30)          # plateau: threshold silent, PREDICT lapses, DRIFT holds
+    send_raw("SIM|nh3=8")
+
 SCRIPTS = {"gas_ramp":script_gas_ramp, "replay":script_replay,
-           "night_intruder":script_night_intruder, "flame":script_flame}
+           "night_intruder":script_night_intruder, "flame":script_flame,
+           "slow_creep":script_slow_creep, "nh3_drift":script_nh3_drift}
 
 # ── fake-data generator ──────────────────────────────────────────────────
 fake = {"gas":120,"nh3":8,"flame":0,"t1":24,"t2":24,"hum":55,"water":600,
@@ -210,7 +231,9 @@ def fake_loop():
             time.sleep(1); continue
         f = fake
         if "gas" not in f["sim"]:
-            f["gas"] = max(80, f["gas"] + random.randint(-15, 15))
+            # mean-reverting around ambient: a sealed pit doesn't wander to 500 on its own,
+            # and a free random walk would let the analyst forecast a leak that isn't there
+            f["gas"] = max(80, f["gas"] + (120 - f["gas"]) * 0.15 + random.uniform(-5, 5))
         f["t1"] = 24 + random.randint(-1, 1)
         f["t2"] = f["t1"] + random.choice([0, 0, 1])
         if f["gas"] >= 700 and f["mode"] != "EMERGENCY":
@@ -230,6 +253,269 @@ def fake_loop():
         handle_line(f"TEL|{tel},fan={f['fan']},relay={f['relay']},vent={f['vent']},saved_pct={random.randint(60,70)}")
         time.sleep(1)
 
+# ── Tier-2 analyst: prediction · baseline drift · plausibility ───────────
+# Deterministic, offline, no external deps. Reads the same TEL stream the
+# dashboard reads and emits AI| lines back into the event bus, so the web UI
+# and the Flutter app both get it for free. It NEVER actuates: no CMD| is ever
+# produced here. The reflex layer (firmware) owns the relay; this layer only
+# tells the farmer what it thinks is about to happen.
+#
+#   AI|<kind>|<zone>|<what>|<message>|<sev>      kind: PREDICT DRIFT PLAUS STUCK
+#
+# sev stays in the firmware's vocabulary (INFO/WARN/ALERT/EMERG) so both UIs
+# colour it with the rules they already have.
+
+# channel -> (zone, label, unit, rising critical limit or None)
+AI_CHANNELS = {
+    "gas":   ("pit",   "CH4",      "",      700.0),
+    "nh3":   ("hall",  "NH3",      " ppm",  25.0),
+    "t1":    ("hall",  "temp",     "°",     32.0),
+    "t2":    ("hall",  "temp 2",   "°",     32.0),
+    "hum":   ("hall",  "humidity", "%",     None),
+    "water": ("store", "water",    "",      None),
+}
+
+def fmt_eta(sec: float) -> str:
+    sec = int(sec)
+    return f"{sec}s" if sec < 60 else f"{sec//60}m{sec%60:02d}s"
+
+class Analyst:
+    ALPHA_V  = 0.35     # value smoothing (samples arrive ~1 Hz)
+    ALPHA_S  = 0.25     # slope smoothing
+    ETA_WARN = 300.0    # s — start forecasting once critical is <5 min out
+    ETA_ALERT= 90.0     # s — escalate inside 90 s
+    Z_WARN   = 4.0      # sigma off the learned baseline
+    Z_HOLD   = 3        # consecutive samples before drift is called
+    STUCK_N  = 25       # identical samples (while the farm moves) => frozen
+    REPEAT_S = 20.0     # don't repeat the same finding faster than this
+    MIN_N    = 8        # samples before the EWMA slope is trusted
+
+    def __init__(self, baseline_secs: float = 45.0):
+        self.baseline_secs = baseline_secs
+        self.findings = deque(maxlen=8)
+        self.reset()
+
+    def reset(self):
+        self.ch = {}
+        self.t0 = None
+        self.last_t = None
+        self.learned_at = None
+        self.learning = True
+        self.fan_since = None
+        self._emitted = {}
+
+    def relearn(self):
+        """Re-learn what 'normal' looks like from now (venue calibration)."""
+        self.reset()
+        self.findings.append({"t": now_t(), "kind": "BASELINE", "sev": "INFO",
+                              "msg": f"re-learning baseline for {int(self.baseline_secs)}s"})
+
+    # ── per-channel state ────────────────────────────────────────────────
+    def _st(self, k):
+        if k not in self.ch:
+            self.ch[k] = {"s": None, "slope": 0.0, "last": None, "n": 0,
+                          "stuck": 0, "z_hold": 0, "rise": 0, "lively": False,
+                          "mu": None, "sd": None, "bn": 0, "bsum": 0.0, "bsq": 0.0}
+        return self.ch[k]
+
+    def _emit_ok(self, key, sev):
+        """Dedupe: same finding at most every REPEAT_S, unless it escalated."""
+        prev = self._emitted.get(key)
+        t = time.time()
+        if prev and t - prev[0] < self.REPEAT_S and prev[1] == sev:
+            return False
+        self._emitted[key] = (t, sev)
+        return True
+
+    # ── main entry, called from handle_line's TEL branch ─────────────────
+    def ingest(self, tel: dict):
+        t = time.time()
+        dt = 1.0 if self.last_t is None else min(5.0, max(0.2, t - self.last_t))
+        self.last_t = t
+        if self.t0 is None:
+            self.t0 = t
+        emerg = state.get("mode") == "EMERGENCY"
+        if self.learning and (t - self.t0 >= self.baseline_secs) and not emerg:
+            self._freeze_baseline()
+
+        moved = False
+        for k in AI_CHANNELS:
+            if k in tel and self._st(k)["last"] is not None:
+                if tel[k]["v"] != self._st(k)["last"]:
+                    moved = True
+
+        out = []
+        for k, (zone, label, unit, limit) in AI_CHANNELS.items():
+            if k not in tel:
+                continue
+            v = tel[k]["v"]
+            st = self._st(k)
+            # EWMA value + slope (per second)
+            if st["s"] is None:
+                st["s"] = v
+            else:
+                prev = st["s"]
+                st["s"] += self.ALPHA_V * (v - st["s"])
+                st["slope"] += self.ALPHA_S * (((st["s"] - prev) / dt) - st["slope"])
+            st["n"] += 1
+            st["rise"] = st["rise"] + 1 if st["slope"] > 0 else 0
+            # frozen-channel counter only advances while the rest of the farm moves
+            st["stuck"] = st["stuck"] + 1 if (moved and st["last"] == v) else 0
+            st["last"] = v
+            if self.learning and not emerg:
+                st["bn"] += 1; st["bsum"] += v; st["bsq"] += v * v
+
+            if not emerg:
+                out += self._predict(k, st, zone, label, unit, limit)
+                out += self._drift(k, st, zone, label, unit)
+            out += self._stuck(k, st, zone, label, unit)
+
+        out += self._plausibility(tel)
+
+        for kind, zone, what, msg, sev in out:
+            self.findings.append({"t": now_t(), "kind": kind, "sev": sev, "msg": msg})
+            handle_line(f"AI|{kind}|{zone}|{what}|{msg}|{sev}")
+        publish({"type": "ai", "ai": self.snapshot()})
+
+    def _freeze_baseline(self):
+        for k, st in self.ch.items():
+            if st["bn"] < 5:
+                continue
+            mu = st["bsum"] / st["bn"]
+            var = max(0.0, st["bsq"] / st["bn"] - mu * mu)
+            raw_sd = var ** 0.5
+            # a probe that never moved while we watched is *supposed* to sit still —
+            # only a normally-lively one going silent means a dead probe
+            st["lively"] = raw_sd > 0.5
+            # floor sigma: a perfectly quiet channel must not yield infinite z
+            st["mu"], st["sd"] = mu, max(raw_sd, 1.0, abs(mu) * 0.02)
+        self.learning = False
+        self.learned_at = now_t()
+        self.findings.append({"t": now_t(), "kind": "BASELINE", "sev": "INFO",
+                              "msg": f"baseline learned from {int(self.baseline_secs)}s of normal operation"})
+        handle_line(f"AI|BASELINE|farm|LEARNED|normal operation profiled over {int(self.baseline_secs)}s|INFO")
+
+    # ── detector 1: rate of rise -> time to threshold ────────────────────
+    def _predict(self, k, st, zone, label, unit, limit):
+        if limit is None or st["n"] < self.MIN_N or st["s"] >= limit:
+            return []
+        per_min = st["slope"] * 60.0
+        if per_min < max(1.0, 0.02 * limit):        # floor: ignore trivial slopes
+            return []
+        # a forecast needs a *sustained* climb, not one noisy sample
+        if st["rise"] < (5 if st["mu"] is not None else 10):
+            return []
+        # ...and the channel must have left its own learned noise band, or jitter
+        # on a quiet probe would forecast a crossing that never comes
+        if st["mu"] is not None and (st["s"] - st["mu"]) < 2.0 * st["sd"]:
+            return []
+        eta = (limit - st["s"]) / st["slope"]
+        if eta <= 0 or eta > self.ETA_WARN:
+            return []
+        sev = "ALERT" if eta <= self.ETA_ALERT else "WARN"
+        msg = (f"{label} rising {per_min:+.0f}{unit}/min → critical "
+               f"({limit:.0f}{unit}) in {fmt_eta(eta)}")
+        return [("PREDICT", zone, k.upper(), msg, sev)] if self._emit_ok(("PREDICT", k), sev) else []
+
+    # ── detector 2: z-score vs frozen baseline (slow drift) ──────────────
+    def _drift(self, k, st, zone, label, unit):
+        if st["mu"] is None:
+            return []
+        p = self._emitted.get(("PREDICT", k))
+        if p and time.time() - p[0] < self.REPEAT_S:
+            return []
+        z = (st["s"] - st["mu"]) / st["sd"]
+        st["z_hold"] = st["z_hold"] + 1 if abs(z) >= self.Z_WARN else 0
+        if st["z_hold"] < self.Z_HOLD:
+            return []
+        lim = AI_CHANNELS[k][3]
+        tail = ("still under the fixed limit, but not normal"
+                if lim is not None and st["s"] < lim else "off its learned normal")
+        msg = (f"{label} drifted {st['mu']:.0f}{unit} → {st['s']:.0f}{unit} "
+               f"({z:+.1f}σ off the baseline learned at {self.learned_at}) — {tail}")
+        sev = "WARN"
+        return [("DRIFT", zone, k.upper(), msg, sev)] if self._emit_ok(("DRIFT", k), sev) else []
+
+    # ── detector 3a: frozen channel (dead probe or replayed telemetry) ───
+    def _stuck(self, k, st, zone, label, unit):
+        if st["stuck"] < self.STUCK_N or not st["lively"]:
+            return []
+        msg = (f"{label} frozen at {st['last']:.0f}{unit} for {st['stuck']}s while the rest "
+               f"of the farm moves — disconnected probe or replayed telemetry")
+        return [("STUCK", zone, k.upper(), msg, "WARN")] if self._emit_ok(("STUCK", k), "WARN") else []
+
+    # ── detector 3b: cross-sensor plausibility ───────────────────────────
+    def _plausibility(self, tel):
+        out = []
+        g = lambda k: tel[k]["v"] if k in tel else None
+        t1, t2, flame, fan = g("t1"), g("t2"), g("flame"), g("fan")
+
+        # fire asserted with no thermal signature => fault or spoofed input
+        st1 = self.ch.get("t1", {})
+        if flame and flame >= 1 and t1 is not None and st1.get("mu") is not None:
+            rise = t1 - st1["mu"]
+            if rise < 1.5 and self._emit_ok(("PLAUS", "flame"), "WARN"):
+                out.append(("PLAUS", "store", "FLAME_IMPLAUSIBLE",
+                            f"flame asserted but hall temp is flat at {t1:.0f}° "
+                            f"({rise:+.1f}° vs baseline) — sensor fault or spoofed input, "
+                            f"treating as suspect", "WARN"))
+
+        # two probes in the same room disagreeing => one of them is lying
+        if t1 is not None and t2 is not None and abs(t1 - t2) >= 6:
+            if self._emit_ok(("PLAUS", "twin"), "WARN"):
+                out.append(("PLAUS", "hall", "PROBE_DISAGREE",
+                            f"hall temp probes disagree by {abs(t1-t2):.0f}° "
+                            f"({t1:.0f}° vs {t2:.0f}°) — one probe is faulty", "WARN"))
+
+        # mitigation running but the channel is not responding
+        now = time.time()
+        self.fan_since = (self.fan_since or now) if fan else None
+        if self.fan_since and now - self.fan_since >= 30:
+            for k in ("gas", "nh3"):
+                lim = AI_CHANNELS[k][3]
+                st = self.ch.get(k)
+                if not st or st["s"] is None or st["s"] < 0.6 * lim:
+                    continue
+                if st["slope"] * 60 >= -0.5 and self._emit_ok(("PLAUS", k), "ALERT"):
+                    out.append(("PLAUS", AI_CHANNELS[k][0], "VENT_INEFFECTIVE",
+                                f"extraction has run {int(now-self.fan_since)}s and "
+                                f"{AI_CHANNELS[k][1]} is still {st['slope']*60:+.0f}/min — "
+                                f"check the fan belt or the inlet", "ALERT"))
+        return out
+
+    # ── snapshot for the live UI panel ───────────────────────────────────
+    def snapshot(self):
+        chans = []
+        for k, (zone, label, unit, limit) in AI_CHANNELS.items():
+            st = self.ch.get(k)
+            if not st or st["s"] is None:
+                continue
+            per_min = st["slope"] * 60.0
+            eta = None
+            if limit and st["slope"] > 0 and st["s"] < limit and st["n"] >= self.MIN_N:
+                e = (limit - st["s"]) / st["slope"]
+                if 0 < e <= 3600:
+                    eta = e
+            z = (st["s"] - st["mu"]) / st["sd"] if st["mu"] is not None else None
+            if st["stuck"] >= self.STUCK_N:      stt = "stuck"
+            elif eta is not None and eta <= self.ETA_ALERT: stt = "alert"
+            elif eta is not None and eta <= self.ETA_WARN:  stt = "predict"
+            elif z is not None and abs(z) >= self.Z_WARN:   stt = "drift"
+            else: stt = "ok"
+            chans.append({"k": k, "label": label, "zone": zone, "unit": unit,
+                          "v": round(st["s"], 1), "per_min": round(per_min, 1),
+                          "eta": None if eta is None else fmt_eta(eta),
+                          "z": None if z is None else round(z, 1),
+                          "limit": limit, "state": stt})
+        prog = 0.0
+        if self.learning and self.t0:
+            prog = min(1.0, (time.time() - self.t0) / self.baseline_secs)
+        return {"learning": self.learning, "learned_at": self.learned_at,
+                "progress": round(prog, 2), "baseline_secs": int(self.baseline_secs),
+                "channels": chans, "findings": list(self.findings)}
+
+analyst = Analyst()
+
 # ── flask ────────────────────────────────────────────────────────────────
 app = Flask(__name__)
 
@@ -241,7 +527,7 @@ def stream():
         q.put({"type":"hello",
                "state":{"mode":state["mode"], "tel":state["tel"]},
                "events":list(events)[-30:], "raws":list(raw_log)[-100:],
-               "counters":counters,
+               "counters":counters, "ai":analyst.snapshot(),
                "serial":{"connected":ser is not None, "port":ser_port}})
         try:
             while True:
@@ -298,6 +584,13 @@ def attack():
         send_raw(f"CMD|{c}|{mac_for(c, a)}|{a}")
     return {"ok": True}
 
+@app.route("/ai/relearn", methods=["POST"])
+def ai_relearn():
+    """Re-profile what 'normal' looks like in THIS room. Venue calibration."""
+    analyst.relearn()
+    publish({"type":"ai", "ai":analyst.snapshot()})
+    return {"ok": True}
+
 @app.route("/sim", methods=["POST"])
 def sim():
     d = request.json
@@ -307,6 +600,17 @@ def sim():
 @app.route("/")
 def index():
     return PAGE
+
+# Bio Guard web app (flutter build web), served same-origin at /app/
+import os
+from flask import send_from_directory
+WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       "..", "flutter_app", "build", "web")
+
+@app.route("/app/")
+@app.route("/app/<path:path>")
+def flutter_web(path="index.html"):
+    return send_from_directory(WEB_DIR, path)
 
 PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -353,6 +657,10 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
    border-radius:6px;padding:2px 6px;display:inline-block;margin-top:4px}
  .pill{display:inline-block;border:1px solid var(--line);border-radius:20px;padding:3px 10px;font-size:12px;margin-left:6px}
  .pill.on{border-color:var(--ok);color:var(--ok)} .pill.off{border-color:var(--warn);color:var(--warn)}
+ .aitag{color:var(--acc);border:1px solid var(--acc);border-radius:4px;padding:0 5px;font-size:10px}
+ tr.ai-alert td{color:var(--alert)} tr.ai-predict td{color:var(--warn)}
+ tr.ai-drift td,tr.ai-stuck td{color:var(--sim)}
+ #banner.AIB{display:block;background:var(--acc);color:#04121f}
 </style></head><body>
 <div id="banner" onclick="this.className=''"></div>
 <h1>BIO GUARD <span class="dim">— bridge & firmware test bench</span>
@@ -373,7 +681,9 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
    <button onclick="script('gas_ramp')">GAS RAMP 200→900→clear</button>
    <button onclick="script('replay')">CMD + REPLAY + BAD MAC</button>
    <button onclick="script('night_intruder')">ARM + INTRUDER</button>
-   <button onclick="script('flame')">FLAME 5s</button>
+   <button onclick="script('flame')">FLAME 5s</button><br>
+   <button class="acc" onclick="script('slow_creep')">AI · SLOW GAS CREEP (predicted ~60s early)</button>
+   <button class="acc" onclick="script('nh3_drift')">AI · NH3 DRIFT (never crosses the limit)</button>
    <button onclick="cmd('DUMPLOG')">AUDIT DUMP</button>
   </div>
   <div id="console"></div>
@@ -411,6 +721,20 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
  </div>
 </div>
 
+<div class="row">
+ <div class="card" style="flex:2">
+  <div class="dim">AI ANALYST <span class="aitag">TIER 2</span> — predictive layer.
+   <b>Advisory only: it never actuates.</b> Every command still goes through CMD|ctr|mac|ACTION.</div>
+  <div id="aibase" class="dim" style="margin:6px 0">waiting for telemetry…</div>
+  <table id="aitab"></table>
+ </div>
+ <div class="card">
+  <div class="dim">AI FINDINGS</div>
+  <div id="aifind" style="height:150px;overflow-y:auto;font-size:12px;line-height:1.5;margin-top:6px">
+   <span class="dim">nothing anomalous</span></div>
+  <button class="acc" onclick="fetch('/ai/relearn',{method:'POST',headers:H})">RELEARN BASELINE</button>
+ </div>
+</div>
 <div class="row">
  <div class="card"><div class="dim">EVENT LOG</div><div id="log"></div></div>
  <div class="card"><div class="dim">CHAINED AUDIT LOG (EEPROM)</div>
@@ -451,11 +775,35 @@ function onTel(t){
  el('z-store').className='zone'+(t.flame&&t.flame.v>0?' alert':(t.water&&t.water.v<200?' warn':''));
  el('z-ctrl').className='zone'+(t.tamp&&t.tamp.v?' alert':'');
 }
+function onAi(a){
+ const b=el('aibase');
+ if(a.learning){const p=Math.round(a.progress*100);
+  b.innerHTML=`<b>learning what "normal" looks like in this room</b> — ${p}% of ${a.baseline_secs}s`;
+  b.style.color='var(--acc)';}
+ else{b.innerHTML=`baseline learned at <b>${a.learned_at||'—'}</b> from ${a.baseline_secs}s of normal operation`;
+  b.style.color='var(--dim)';}
+ el('aitab').innerHTML='<tr><th>channel</th><th>value</th><th>trend</th><th>time to critical</th><th>vs baseline</th></tr>'+
+  a.channels.map(c=>{
+   const flat=Math.abs(c.per_min)<0.5;
+   const arrow=c.per_min>0?'▲':'▼';
+   const trend=flat?'<span class=dim>steady</span>':`${arrow} ${c.per_min>0?'+':''}${c.per_min}${c.unit}/min`;
+   const eta=c.eta?`<b class="${c.state=='alert'?'ALERT':'WARN'}">${c.eta}</b>`:'<span class=dim>—</span>';
+   const z=(c.z===null||c.z===undefined)?'<span class=dim>learning</span>'
+     :`<span class="${Math.abs(c.z)>=4?'WARN':'dim'}">${c.z>0?'+':''}${c.z}σ</span>`;
+   return `<tr class="ai-${c.state}"><td>${c.label} <span class=dim>${c.zone}</span></td>`+
+     `<td>${c.v}${c.unit}</td><td>${trend}</td><td>${eta}</td><td>${z}</td></tr>`;
+  }).join('');
+ el('aifind').innerHTML=a.findings.slice().reverse().map(f=>
+   `<div class="${f.sev}">${f.t} <b>${f.kind}</b> ${f.msg}</div>`).join('')
+   ||'<span class=dim>nothing anomalous</span>';
+}
 function banner(cls,msg){const b=el('banner');b.className=cls;b.textContent=msg+'  (tap to dismiss)';}
 function onEvent(e,old){const d=document.createElement('div');d.className=e.sev;
  d.textContent=`${e.t}  ${e.raw}`;el('log').prepend(d);
  if(old)return;
  const p=e.raw.split('|');
+ if(p[0]==='AI'){if(el('banner').className!=='EMERG'&&(e.sev==='ALERT'||e.sev==='WARN'))
+   banner('AIB','AI ANALYST: '+(p[4]||''));return;}
  if(e.sev==='EMERG')banner('EMERG','EMERGENCY: '+(p[3]||'')+' — zone '+(p[2]||'?'));
  else if(e.sev==='ALERT')banner('ALERT','ALERT: '+(p[3]||'')+' — '+(p[2]||''));
  else if(e.sev==='SEC')banner('SEC','CYBER: '+p.slice(1).join(' · '));
@@ -470,10 +818,12 @@ es.onmessage=ev=>{const m=JSON.parse(ev.data);
  else if(m.type=='state')onMode(m.mode);
  else if(m.type=='event')onEvent(m.event);
  else if(m.type=='log')onLog(m.log);
+ else if(m.type=='ai')onAi(m.ai);
  else if(m.type=='serial')onSerial(m);
  else if(m.type=='hello'){onMode(m.state.mode);onTel(m.state.tel||{});
    (m.events||[]).forEach(e=>onEvent(e,true));(m.raws||[]).forEach(onRaw);
-   onCounters(m.counters||{rx:0,tx:0,unparsed:0});onSerial(m.serial||{});}};
+   onCounters(m.counters||{rx:0,tx:0,unparsed:0});onSerial(m.serial||{});
+   if(m.ai)onAi(m.ai);}};
 loadPorts();
 </script></body></html>"""
 
@@ -482,11 +832,16 @@ if __name__ == "__main__":
     ap.add_argument("--port", help="serial port to auto-connect at startup (optional; UI can pick)")
     ap.add_argument("--baud", type=int, default=115200)
     ap.add_argument("--fake", action="store_true", help="generated data, no Arduino")
+    ap.add_argument("--baseline", type=float, default=45.0,
+                    help="seconds of normal operation the analyst learns from (venue: 600)")
     ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--http-port", type=int, default=5001,
+                    help="dashboard port (use another one to run a second bench alongside)")
     args = ap.parse_args()
+    analyst.baseline_secs = args.baseline
     if args.fake:
         fake_on = True
         threading.Thread(target=fake_loop, daemon=True).start()
     if args.port:
         threading.Thread(target=reader_loop, args=(args.port, args.baud), daemon=True).start()
-    app.run(host=args.host, port=5001, threaded=True)
+    app.run(host=args.host, port=args.http_port, threaded=True)

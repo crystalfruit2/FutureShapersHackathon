@@ -10,75 +10,43 @@ class HomeScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final app = context.watch<AppState>();
+    final anomalies = app.tel.anomalies();
     return SafeArea(
       child: ListView(
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
         children: [
           _Header(app: app),
-          const SizedBox(height: 20),
-          _StatusHero(app: app),
+          const SizedBox(height: 14),
+          if (anomalies.isNotEmpty) _AnomalyBanner(anomalies: anomalies),
+          if (anomalies.isEmpty) _AllQuiet(app: app),
           const SectionLabel('Zones'),
-          _ZoneCard(
-            icon: Icons.egg_outlined,
-            name: 'Poultry hall',
-            status: _hallStatus(app.tel),
-            rows: [
-              _m('Ammonia', app.tel.has('nh3') ? '${app.tel.v('nh3').round()} ppm' : '—',
-                  sim: app.tel.sim('nh3')),
-              _m('Temperature',
-                  app.tel.has('t1') ? '${app.tel.v('t1').round()}° / ${app.tel.v('t2').round()}°' : '—'),
-              _m('Humidity', app.tel.has('hum') ? '${app.tel.v('hum').round()}%' : '—'),
-            ],
-          ),
-          const SizedBox(height: 10),
-          _ZoneCard(
-            icon: Icons.layers_outlined,
-            name: 'Manure pit',
-            status: _pitStatus(app.tel),
-            banner: app.tel.v('gas') >= 700
-                ? 'DO NOT ENTER — gas hazard. Most manure-gas victims are would-be rescuers.'
-                : null,
-            rows: [
-              _m('Methane', '${app.tel.v('gas').round()} / 1023',
-                  sim: app.tel.sim('gas')),
-              _m('Gas valve', app.tel.v('relay', 1) == 1 ? 'Open' : 'CLOSED',
-                  emphasized: app.tel.v('relay', 1) != 1),
-              _m('Exhaust fan', app.tel.v('fan') == 1 ? 'Running' : 'Off'),
-            ],
-          ),
-          const SizedBox(height: 10),
-          _ZoneCard(
-            icon: Icons.inventory_2_outlined,
-            name: 'Feed & water store',
-            status: _storeStatus(app.tel),
-            rows: [
-              _m('Water level', app.tel.has('water') ? '${app.tel.v('water').round()} / 1023' : '—'),
-              _m('Flame', app.tel.v('flame') == 0 ? 'None' : 'DETECTED',
-                  sim: app.tel.sim('flame'), emphasized: app.tel.v('flame') != 0),
-            ],
-          ),
-          const SizedBox(height: 10),
-          _ZoneCard(
-            icon: Icons.dns_outlined,
-            name: 'Control room',
-            status: app.tel.v('tamp') == 1 ? T.danger : T.ok,
-            rows: [
-              _m('Cabinet', app.tel.v('tamp') == 1 ? 'OPEN' : 'Closed',
-                  emphasized: app.tel.v('tamp') == 1),
-              _m('Vent flap', app.tel.v('vent') == 1 ? 'Open' : 'Shut'),
-            ],
-          ),
+          for (final z in zoneNames.keys) ...[
+            _ZoneCard(zone: z, app: app),
+            const SizedBox(height: 10),
+          ],
           const SectionLabel('Energy'),
           Panel(
             child: Row(children: [
               Expanded(
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text('${app.tel.v('saved_pct').round()}%',
-                      style: const TextStyle(
-                          fontSize: 34, fontWeight: FontWeight.w600, color: T.ok)),
+                  Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                    Text('${app.tel.v('saved_pct').round()}%',
+                        style: const TextStyle(
+                            fontSize: 34, fontWeight: FontWeight.w600, color: T.ok)),
+                    const SizedBox(width: 12),
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 5),
+                      child: Text(
+                          '≈ ${(app.tel.v('saved_pct') / 100 * 1440 * 0.8).round()} lei/month',
+                          style: const TextStyle(
+                              fontSize: 17, fontWeight: FontWeight.w600, color: T.text)),
+                    ),
+                  ]),
                   const SizedBox(height: 2),
                   Text('power saved vs always-on ventilation',
                       style: Theme.of(context).textTheme.bodySmall),
+                  Text('at farm scale: 2 kW ventilation · 0.80 lei/kWh',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(fontSize: 10.5)),
                 ]),
               ),
               const Icon(Icons.bolt_outlined, color: T.sub, size: 28),
@@ -88,14 +56,6 @@ class HomeScreen extends StatelessWidget {
       ),
     );
   }
-
-  Color _hallStatus(Telemetry t) =>
-      t.v('nh3') >= 25 ? T.warn : (t.v('t1') >= 32 ? T.warn : T.ok);
-  Color _pitStatus(Telemetry t) =>
-      t.v('gas') >= 700 ? T.danger : (t.v('gas') >= 450 ? T.warn : T.ok);
-  Color _storeStatus(Telemetry t) => t.v('flame') != 0
-      ? T.danger
-      : (t.has('water') && t.v('water') < 200 ? T.warn : T.ok);
 }
 
 class _Header extends StatelessWidget {
@@ -125,25 +85,59 @@ class _Header extends StatelessWidget {
       );
 }
 
-class _StatusHero extends StatelessWidget {
-  final AppState app;
-  const _StatusHero({required this.app});
+/// Red popup at the top whenever anything is off-normal.
+class _AnomalyBanner extends StatelessWidget {
+  final List<Anomaly> anomalies;
+  const _AnomalyBanner({required this.anomalies});
 
   @override
   Widget build(BuildContext context) {
-    final (color, title, caption) = switch (app.mode) {
-      FarmMode.day => (T.ok, 'All systems normal', '4 zones monitored · daytime mode'),
-      FarmMode.night => (T.accent, 'Armed for the night',
-          'Perimeter and sound watch active'),
-      FarmMode.emergency => (T.danger, 'EMERGENCY', 'Automatic protections engaged'),
-      FarmMode.lockdown => (T.warn, 'Locked down',
-          'Repeated wrong PINs — enter PIN at the panel'),
-      FarmMode.unknown => (T.sub, 'Connecting…', 'Waiting for the farm node'),
+    final critical = anomalies.any((a) => a.critical);
+    final color = critical ? T.danger : T.warn;
+    return Panel(
+      borderColor: color,
+      padding: const EdgeInsets.all(14),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Icon(critical ? Icons.emergency_outlined : Icons.warning_amber_outlined,
+              color: color, size: 20),
+          const SizedBox(width: 8),
+          Text(critical ? 'Attention required' : 'Off-normal readings',
+              style: TextStyle(
+                  color: color, fontWeight: FontWeight.w700, fontSize: 15)),
+          const Spacer(),
+          Text('${anomalies.length}',
+              style: TextStyle(color: color, fontWeight: FontWeight.w700)),
+        ]),
+        const SizedBox(height: 8),
+        for (final a in anomalies.take(3))
+          Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: Text('•  ${a.message}',
+                style: TextStyle(
+                    color: a.critical ? T.danger : T.text, fontSize: 14)),
+          ),
+        if (anomalies.length > 3)
+          Text('and ${anomalies.length - 3} more…',
+              style: Theme.of(context).textTheme.bodySmall),
+      ]),
+    );
+  }
+}
+
+class _AllQuiet extends StatelessWidget {
+  final AppState app;
+  const _AllQuiet({required this.app});
+  @override
+  Widget build(BuildContext context) {
+    final (title, caption) = switch (app.mode) {
+      FarmMode.night => ('Armed for the night', 'Perimeter and sound watch active'),
+      FarmMode.lockdown => ('Locked down', 'Enter PIN at the panel'),
+      _ => ('All systems normal', '${zoneNames.length} zones monitored'),
     };
     return Panel(
-      borderColor: app.mode == FarmMode.emergency ? T.danger : null,
       child: Row(children: [
-        StatusDot(color, size: 12),
+        const StatusDot(T.ok, size: 12),
         const SizedBox(width: 12),
         Expanded(
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -157,73 +151,113 @@ class _StatusHero extends StatelessWidget {
   }
 }
 
-class _Metric {
-  final String label, value;
-  final bool sim, emphasized;
-  const _Metric(this.label, this.value, this.sim, this.emphasized);
-}
-
-_Metric _m(String label, String value, {bool sim = false, bool emphasized = false}) =>
-    _Metric(label, value, sim, emphasized);
+const _zoneIcons = {
+  'hall': Icons.egg_outlined,
+  'field': Icons.grass_outlined,
+  'stor': Icons.inventory_2_outlined,
+  'ctrl': Icons.dns_outlined,
+};
 
 class _ZoneCard extends StatelessWidget {
-  final IconData icon;
-  final String name;
-  final Color status;
-  final List<_Metric> rows;
-  final String? banner;
-  const _ZoneCard(
-      {required this.icon, required this.name, required this.status,
-       required this.rows, this.banner});
+  final String zone;
+  final AppState app;
+  const _ZoneCard({required this.zone, required this.app});
 
   @override
   Widget build(BuildContext context) {
+    final metrics = zoneMetrics[zone]!;
+    Color worst = T.ok;
+    for (final m in metrics) {
+      final c = app.tel.zoneMetric(zone, m);
+      if (c == null) continue;
+      final a = checkMetric(zone, m, c.value);
+      if (a != null) worst = a.critical ? T.danger : (worst == T.danger ? worst : T.warn);
+    }
     return Panel(
-      borderColor: status == T.danger ? T.danger.withValues(alpha: 0.7) : null,
+      borderColor: worst == T.danger ? T.danger.withValues(alpha: 0.7) : null,
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
-          Icon(icon, size: 20, color: T.sub),
+          Icon(_zoneIcons[zone], size: 20, color: T.sub),
           const SizedBox(width: 10),
-          Text(name, style: Theme.of(context).textTheme.titleMedium),
+          Text(zoneNames[zone]!, style: Theme.of(context).textTheme.titleMedium),
           const Spacer(),
-          StatusDot(status),
+          StatusDot(worst),
         ]),
         const SizedBox(height: 12),
-        for (final r in rows)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 6),
-            child: Row(children: [
-              Text(r.label, style: Theme.of(context).textTheme.bodySmall),
-              if (r.sim) const SimBadge(),
-              const Spacer(),
-              Text(r.value,
-                  style: TextStyle(
-                      fontSize: 15,
-                      fontWeight: r.emphasized ? FontWeight.w700 : FontWeight.w500,
-                      color: r.emphasized ? T.danger : T.text)),
-            ]),
-          ),
-        if (banner != null) ...[
-          const SizedBox(height: 6),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: T.danger.withValues(alpha: 0.12),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Row(children: [
-              const Icon(Icons.dangerous_outlined, color: T.danger, size: 18),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(banner!,
-                    style: const TextStyle(
-                        color: T.danger, fontSize: 13, fontWeight: FontWeight.w600)),
-              ),
-            ]),
-          ),
-        ],
+        // two-column metric grid
+        LayoutBuilder(builder: (context, box) {
+          final colW = (box.maxWidth - 12) / 2;
+          return Wrap(spacing: 12, runSpacing: 8, children: [
+            for (final m in metrics)
+              SizedBox(width: colW, child: _MetricRow(zone: zone, metric: m, app: app)),
+          ]);
+        }),
       ]),
     );
+  }
+}
+
+class _MetricRow extends StatelessWidget {
+  final String zone, metric;
+  final AppState app;
+  const _MetricRow({required this.zone, required this.metric, required this.app});
+
+  @override
+  Widget build(BuildContext context) {
+    final c = app.tel.zoneMetric(zone, metric);
+    final (label, unit) = metricDefs[metric]!;
+    final anomaly = c == null ? null : checkMetric(zone, metric, c.value);
+    Widget value;
+    if (c == null) {
+      value = const Text('—', style: TextStyle(color: T.sub, fontSize: 14));
+    } else if (metric == 'motion' || metric == 'fire') {
+      final yes = c.value >= 1;
+      value = Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
+        decoration: BoxDecoration(
+          color: yes ? T.danger.withValues(alpha: 0.15) : Colors.transparent,
+          border: Border.all(color: yes ? T.danger : T.hairline),
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Text(yes ? 'YES' : 'no',
+            style: TextStyle(
+                fontSize: 12,
+                fontWeight: yes ? FontWeight.w700 : FontWeight.w500,
+                color: yes ? T.danger : T.sub)),
+      );
+    } else if (metric == 'light') {
+      value = Text(c.value >= 1 ? 'On' : 'Off',
+          style: TextStyle(fontSize: 14, color: c.value >= 1 ? T.text : T.sub));
+    } else if (metric == 'sound') {
+      value = Text(c.value >= 1 ? 'Active' : 'Quiet',
+          style: TextStyle(
+              fontSize: 14, color: c.value >= 1 ? T.warn : T.sub));
+    } else if (metric == 'gas') {
+      final pct = (c.value / 700 * 100).round();
+      value = Text('$pct% of alarm',
+          style: TextStyle(
+              fontSize: 14,
+              fontWeight: anomaly != null ? FontWeight.w700 : FontWeight.w500,
+              color: anomaly == null ? T.text : (anomaly.critical ? T.danger : T.warn)));
+    } else {
+      value = Text('${c.value.round()}$unit',
+          style: TextStyle(
+              fontSize: 14,
+              fontWeight: anomaly != null ? FontWeight.w700 : FontWeight.w500,
+              color: anomaly == null ? T.text : (anomaly.critical ? T.danger : T.warn)));
+    }
+    return Row(children: [
+      Expanded(
+        child: Row(children: [
+          Flexible(
+            child: Text(label,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.bodySmall),
+          ),
+          if (c?.simulated ?? false) const SimBadge(),
+        ]),
+      ),
+      value,
+    ]);
   }
 }

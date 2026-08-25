@@ -14,6 +14,8 @@ must emit/accept exactly these lines:
 up:   EVT|<ms>|<zone>|<type>|<value>|<sev>     sev: INFO WARN ALERT EMERG
       TEL|gas=512,nh3=12s,t1=24,...,fan=1,relay=1,vent=0,saved_pct=63   (1 Hz; 's' = simulated)
       STATE|<mode>      SEC|<what>      ACK|<ctr>      LOG|<slot>|<type>|<val>|<min>|<OK/BROKEN/EMPTY>
+      AI|<kind>|<zone>|<what>|<message>|<sev>   kind: PREDICT DRIFT PLAUS STUCK BASELINE
+                                                (emitted by the laptop, never by the firmware)
 down: SIM|<name>=<value>                        (demo injection for missing sensors)
       CMD|<ctr>|<mac>|<ACTION>                  mac = CRC8("<ctr>|<ACTION>" then secret "STRAJER26")
 ```
@@ -28,6 +30,37 @@ python3 dashboard/app.py --port /dev/cu.usbmodem*  # against real hardware
 event log, energy-saved tally, sim sliders (NH₃/flame/motion = the "keyboard
 simulation"), **⚔ REPLAY ATTACK button** (the live cyber demo), chained-log verify.
 Verified working in fake mode incl. replay rejection.
+
+## AI analyst — Tier 2 (`dashboard/app.py`, no extra deps)
+Three layers, and the pitch line that goes with them: **reflex** (firmware, ms, cuts the
+valve, needs no network) · **perception** (this analyst, 1 Hz, sees it coming) ·
+**language** (Claude, later). The analyst is **advisory only — it never actuates.** No `CMD|`
+is ever produced by it; commands still carry the CRC8 MAC and the monotonic counter.
+Say that out loud in the demo: *a language model cannot open a valve on this farm.*
+
+It reads the same `TEL|` stream everything else reads and emits `AI|` lines back into the
+event bus, so the web dashboard **and** the Flutter app both get it for free. Four detectors:
+
+| kind | what it catches | why a fixed threshold can't |
+| --- | --- | --- |
+| `PREDICT` | EWMA rate-of-rise → time-to-threshold (*"CH₄ +240/min → critical in 1m29s"*) | fires ~60 s **before** the 700 limit — the Suceava anchor |
+| `DRIFT` | z-score vs. a baseline learned on site | NH₃ creeping 8→22 ppm never crosses the 25 limit, but it's a failing fan belt |
+| `PLAUS` | cross-sensor: flame with no thermal rise · probes disagreeing · extraction running but the gas still climbing | spoofed/faulty input, and a *cyber* finding as much as a safety one |
+| `STUCK` | a normally-lively probe frozen while the farm moves | dead probe or **replayed telemetry** |
+
+Guards that keep it honest: a forecast needs a sustained climb **and** a departure from the
+channel's own learned noise band, so probe jitter can't invent a crossing; `STUCK` only fires
+on probes the baseline saw moving; nothing is learned while the node is in `EMERGENCY`.
+
+```
+python3 dashboard/app.py --fake                       # baseline learns in 45 s
+python3 dashboard/app.py --fake --baseline 600        # at the venue: 10 min of real "normal"
+python3 dashboard/app.py --fake --http-port 5055      # second bench beside a live one
+```
+AI ANALYST panel = live per-channel trend, ETA and σ, plus RELEARN BASELINE (re-profile
+"normal" in *this* room — good demo beat). Two demo sequences in the bench panel:
+**AI · SLOW GAS CREEP** (predicted ~60 s before the reflex layer fires) and
+**AI · NH₃ DRIFT** (caught while staying under the fixed limit).
 
 ## Firmware test bench — how we test Oleksandr's firmware (Tue/Wed)
 `dashboard/app.py` doubles as the test bench. With the UNO plugged into the laptop:

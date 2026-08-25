@@ -12,12 +12,19 @@ class EmergencyOverlay extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final app = context.watch<AppState>();
-    final gasEmerg = app.tel.v('gas') >= 700;
-    final headline = gasEmerg
-        ? 'Methane critical\nin the manure pit'
-        : app.tel.v('flame') != 0
-            ? 'Flame detected\nin the feed store'
-            : 'Emergency at the farm';
+    // headline comes from the event that STARTED the emergency — live
+    // telemetry drifts during the episode and would flip the text
+    final trigger =
+        app.events.where((e) => e.sev == Severity.emerg).firstOrNull;
+    final zone = zoneNames[trigger?.zone] ?? 'the farm';
+    final headline = switch (trigger?.type) {
+      'GAS_CRITICAL' => 'Methane critical\nin the ${zone.toLowerCase()}',
+      'FLAME_DETECTED' => 'Fire detected\nin the ${zone.toLowerCase()}',
+      _ => 'Emergency at the farm',
+    };
+    final valveCut = app.tel.v('relay', 1) == 0;
+    final fanOn = app.tel.v('fan') == 1;
+    final ventOpen = app.tel.v('vent') == 1;
     return Material(
       color: T.emergBg,
       child: SafeArea(
@@ -35,10 +42,13 @@ class EmergencyOverlay extends StatelessWidget {
             const Text('The node acted on its own — you were asleep, it was not.',
                 style: TextStyle(fontSize: 15, color: Color(0xFFE0B4B0))),
             const SizedBox(height: 28),
-            const _Done('Gas valve closed'),
-            const _Done('Exhaust fans purging'),
-            const _Done('Vent flaps opened'),
-            const _Done('Site siren sounding'),
+            // only claim what telemetry confirms — this jury punishes fabricated status
+            if (valveCut) const _Done('Gas valve closed'),
+            if (fanOn) const _Done('Exhaust fans purging'),
+            if (ventOpen) const _Done('Vent flaps opened'),
+            if (!valveCut && !fanOn && !ventOpen)
+              const Text('Automatic protections engaging…',
+                  style: TextStyle(color: Colors.white, fontSize: 16)),
             const SizedBox(height: 20),
             Container(
               width: double.infinity,
@@ -53,7 +63,7 @@ class EmergencyOverlay extends StatelessWidget {
                 SizedBox(width: 12),
                 Expanded(
                   child: Text(
-                      'DO NOT enter the pit to check on animals.\nMost manure-gas victims are rescuers.',
+                      'DO NOT enter to check on the animals.\nMost farm-gas victims are would-be rescuers.',
                       style: TextStyle(
                           color: Colors.white, fontWeight: FontWeight.w600, height: 1.3)),
                 ),
@@ -108,10 +118,7 @@ class SecToast extends StatelessWidget {
       left: 16, right: 16, bottom: 84,
       child: Material(
         color: Colors.transparent,
-        child: Dismissible(
-          key: ValueKey(event.raw + event.time),
-          onDismissed: (_) => context.read<AppState>().clearSecToast(),
-          child: GestureDetector(
+        child: GestureDetector(
             onTap: () => context.read<AppState>().clearSecToast(),
             child: Container(
               padding: const EdgeInsets.all(14),
@@ -136,7 +143,6 @@ class SecToast extends StatelessWidget {
                 ),
               ]),
             ),
-          ),
         ),
       ),
     );

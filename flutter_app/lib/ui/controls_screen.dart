@@ -21,6 +21,41 @@ class _ControlsScreenState extends State<ControlsScreen> {
         padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
         children: [
           Text('Controls', style: Theme.of(context).textTheme.headlineMedium),
+          const SectionLabel('Demo director'),
+          Panel(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('One tap = one rehearsed pitch scene. The operator taps, the narrator talks.',
+                  style: Theme.of(context).textTheme.bodySmall),
+              const SizedBox(height: 10),
+              Row(children: [
+                for (final (n, label) in [(1, 'Control'), (2, 'Energy'), (3, 'Security'), (4, 'Gas + cyber')]) ...[
+                  Expanded(
+                    child: OutlinedButton(
+                      style: OutlinedButton.styleFrom(
+                          foregroundColor: app.sceneRunning ? T.sub : T.text,
+                          side: const BorderSide(color: T.hairline),
+                          padding: const EdgeInsets.symmetric(vertical: 10)),
+                      onPressed: app.sceneRunning ? null : () => app.runScene(n),
+                      child: Column(children: [
+                        Text('$n', style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
+                        Text(label, style: const TextStyle(fontSize: 10.5)),
+                      ]),
+                    ),
+                  ),
+                  if (n < 4) const SizedBox(width: 8),
+                ],
+              ]),
+              if (app.sceneRunning) ...[
+                const SizedBox(height: 10),
+                Row(children: [
+                  const SizedBox(width: 14, height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: T.accent)),
+                  const SizedBox(width: 8),
+                  Text('Scene running…', style: Theme.of(context).textTheme.bodySmall),
+                ]),
+              ],
+            ]),
+          ),
           const SectionLabel('Farm'),
           Panel(
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -40,8 +75,13 @@ class _ControlsScreenState extends State<ControlsScreen> {
                     selected: {
                       app.mode == FarmMode.night ? FarmMode.night : FarmMode.day
                     },
-                    onSelectionChanged: (s) =>
-                        app.command(s.first == FarmMode.night ? 'ARM' : 'DISARM'),
+                    onSelectionChanged: (s) {
+                      if (s.first == FarmMode.night) {
+                        app.command('ARM');
+                      } else {
+                        _askPin(context, app); // disarming needs the user PIN
+                      }
+                    },
                     style: ButtonStyle(
                       side: WidgetStatePropertyAll(
                           BorderSide(color: T.hairline)),
@@ -182,6 +222,91 @@ class _ControlsScreenState extends State<ControlsScreen> {
   }
 }
 
+void _askPin(BuildContext context, AppState app) {
+  showModalBottomSheet(
+    context: context,
+    backgroundColor: T.surface,
+    shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+    builder: (_) => ChangeNotifierProvider.value(value: app, child: const _PinSheet()),
+  );
+}
+
+/// 4-button PIN pad — deliberately the same four keys as the physical
+/// panel's resistor-ladder pad ("authentication & access layers").
+class _PinSheet extends StatefulWidget {
+  const _PinSheet();
+  @override
+  State<_PinSheet> createState() => _PinSheetState();
+}
+
+class _PinSheetState extends State<_PinSheet> {
+  final _digits = <int>[];
+  String? _error;
+
+  void _tap(int d) {
+    if (_digits.length >= 4) return;
+    setState(() => _digits.add(d));
+    if (_digits.length == 4) {
+      final r = context.read<AppState>().tryDisarm(List.of(_digits));
+      switch (r) {
+        case PinResult.ok:
+          Navigator.pop(context);
+        case PinResult.wrong:
+          setState(() { _digits.clear(); _error = 'Wrong PIN'; });
+        case PinResult.locked:
+          setState(() { _digits.clear(); _error = 'Locked out — try again in 30 s'; });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.fromLTRB(24, 20, 24, 40),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Text('Enter PIN to disarm', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 4),
+          Text('Same code as the control-room panel',
+              style: Theme.of(context).textTheme.bodySmall),
+          const SizedBox(height: 18),
+          Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+            for (var i = 0; i < 4; i++)
+              Container(
+                width: 14, height: 14,
+                margin: const EdgeInsets.symmetric(horizontal: 7),
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: i < _digits.length ? T.accent : Colors.transparent,
+                  border: Border.all(color: i < _digits.length ? T.accent : T.hairline, width: 1.5),
+                ),
+              ),
+          ]),
+          if (_error != null) ...[
+            const SizedBox(height: 10),
+            Text(_error!, style: const TextStyle(color: T.danger, fontSize: 13, fontWeight: FontWeight.w600)),
+          ],
+          const SizedBox(height: 18),
+          Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+            for (var d = 1; d <= 4; d++)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 6),
+                child: SizedBox(
+                  width: 64, height: 64,
+                  child: OutlinedButton(
+                    style: OutlinedButton.styleFrom(
+                        shape: const CircleBorder(),
+                        side: const BorderSide(color: T.hairline),
+                        foregroundColor: T.text),
+                    onPressed: () => _tap(d),
+                    child: Text('$d', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w600)),
+                  ),
+                ),
+              ),
+          ]),
+        ]),
+      );
+}
+
 class _Toggle extends StatelessWidget {
   final String label;
   final IconData icon;
@@ -268,6 +393,12 @@ class _ConnectionPanel extends StatefulWidget {
 
 class _ConnectionPanelState extends State<_ConnectionPanel> {
   late final _url = TextEditingController(text: widget.app.bridgeUrl);
+
+  @override
+  void dispose() {
+    _url.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
