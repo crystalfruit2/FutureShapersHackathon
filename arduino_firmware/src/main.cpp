@@ -2,17 +2,15 @@
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 
-// Define custom I2C pins (Works on ESP32/ESP8266/RP2040)
-// Note: If using Arduino Uno/Nano, use A4 (SDA) and A5 (SCL) instead.
-const int SDA_PIN = 6;
-const int SCL_PIN = 7;
+// Standard Arduino I2C pins (Uno/Nano):
+// Connect LCD SDA to A4
+// Connect LCD SCL to A5
 
 // Initialize the LCD address to 0x27 for a 16 chars and 2 line display
-// (If 0x27 doesn't work, try 0x3F)
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
 const int alarmPin = 13;
-const int sensorPin = A0;
+const int sensorPin = A0; // Pin for the ADC reading
 const int ALARM_TIMEOUT = 250;
 
 bool alarmFlag = false;
@@ -44,13 +42,11 @@ void check_alarm() {
 }
 
 void setup() {
-  // Initialize serial communication
   Serial.begin(9600); 
   pinMode(alarmPin, OUTPUT);
   
-  // Initialize I2C communication with custom pins 
-  // (Remove SDA_PIN and SCL_PIN arguments if using a standard Arduino Uno/Nano)
-  Wire.begin(SDA_PIN, SCL_PIN);
+  // Initialize standard Hardware I2C (uses A4 and A5 automatically)
+  Wire.begin();
 
   // Initialize the LCD and turn on the backlight
   lcd.init();
@@ -78,9 +74,7 @@ void loop() {
   // Print the value on the second line
   lcd.setCursor(0, 1);
   lcd.print(gasLevelValue);
-  
-  // Print extra spaces to clear any leftover characters if the number drops from 1000 to 99
-  lcd.print("    "); 
+  lcd.print("    "); // Clear leftover characters
 
   // Handle the alarm
   check_alarm();
