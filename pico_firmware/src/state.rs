@@ -43,10 +43,10 @@ pub async fn buzzer_alert(mut pin: Output<'static>) {
     loop {
         match state {
             State::Idle => {
-
+                // TODO
             },
             State::Warning => {
-
+                // TODO
             }
             State::Alert => {
                 let buzzer_future = async {
@@ -66,5 +66,36 @@ pub async fn buzzer_alert(mut pin: Output<'static>) {
         }
 
         state = rx.changed().await;
+    }
+}
+
+#[embassy_executor::task]
+pub async fn rgb_status(mut red: Output<'static>, mut green: Output<'static>, mut blue: Output<'static>) {
+    // set green as default
+    red.set_low();
+    green.set_high();
+    blue.set_low();
+
+    let mut rx = STATE.receiver().unwrap();
+    loop {
+        let state = rx.changed().await;
+
+        match state {
+            State::Idle => {
+                red.set_low();
+                green.set_high();
+                blue.set_low();
+            },
+            State::Warning => {
+                red.set_low();
+                green.set_high();
+                blue.set_high();
+            },
+            State::Alert => {
+                red.set_high();
+                green.set_low();
+                blue.set_low();
+            }
+        }
     }
 }
