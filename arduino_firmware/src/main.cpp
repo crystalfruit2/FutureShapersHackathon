@@ -14,12 +14,17 @@ const int sensorPin = A0; // Pin for the ADC reading
 const int ALARM_TIMEOUT = 250;
 
 bool alarmFlag = false;
+
 int gasLevelValue = 0;
+
+const int GAS_ALERT_THRESHOLD = 600;
 
 // Function declarations
 void start_alarm();
 void stop_alarm();
 void check_alarm();
+void check_gas();
+void lcd_task();
 
 // Start an alarm
 void start_alarm() {
@@ -29,6 +34,7 @@ void start_alarm() {
 // Stop the alarm
 void stop_alarm() {
   alarmFlag = false;
+  digitalWrite(alarmPin, LOW);
 }
 
 // Buzz in case of alarm
@@ -38,6 +44,34 @@ void check_alarm() {
     delay(ALARM_TIMEOUT);
     digitalWrite(alarmPin, LOW);
     delay(ALARM_TIMEOUT);
+  }
+}
+
+void check_gas() {
+  if (gasLevelValue >= GAS_ALERT_THRESHOLD) {
+    start_alarm();
+  }
+  else {
+    stop_alarm();
+  }
+}
+
+void lcd_task() {
+  if (!alarmFlag) {
+    // Display the data on the LCD
+    lcd.setCursor(0, 0);
+    lcd.print("Gas Level:");
+    
+    // Print the value on the second line
+    lcd.setCursor(0, 1);
+    lcd.print(gasLevelValue);
+    lcd.print("    "); // Clear leftover characters
+  } else {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("ALERT!!!");
+    lcd.setCursor(0, 1);
+    lcd.print("Gas level too high");
   }
 }
 
@@ -54,7 +88,7 @@ void setup() {
   
   // Print a startup test message
   lcd.setCursor(0, 0);
-  lcd.print("Gas Sensor Test");
+  lcd.print("Team 2 presents");
   delay(2000);
   lcd.clear();
 }
@@ -62,20 +96,9 @@ void setup() {
 void loop() {
   // Read the analog value
   gasLevelValue = analogRead(sensorPin);
-  
-  // Print to Serial Monitor
-  Serial.print("Gas level ADC: ");
-  Serial.println(gasLevelValue);
-
-  // Display the data on the LCD
-  lcd.setCursor(0, 0);
-  lcd.print("Gas Level:");
-  
-  // Print the value on the second line
-  lcd.setCursor(0, 1);
-  lcd.print(gasLevelValue);
-  lcd.print("    "); // Clear leftover characters
 
   // Handle the alarm
   check_alarm();
+  check_gas();
+  lcd_task();
 }
