@@ -5,7 +5,7 @@ use embassy_rp::adc::{Adc, Async, Channel};
 use embassy_time::Timer;
 
 use crate::telemetry::TELEMETRY;
-use crate::state::{STATE, State};
+use crate::state::{STATE, State, AlertType};
 
 const GAS_ALERT_THRESHOLD: u16 = 3000;
 
@@ -22,7 +22,7 @@ pub async fn read_gas(
             t.gas = Some(level);
         }
         if level > GAS_ALERT_THRESHOLD {
-            tx.send(State::Alert);
+            tx.send(State::Alert(AlertType::Gas));
         }
         Timer::after_millis(500).await;
     }

@@ -12,6 +12,7 @@ use heapless::String;
 use hd44780_driver::{Cursor, CursorBlink, HD44780};
 use hd44780_driver::bus::I2CBus;
 
+use crate::state::{AlertType, STATE, State};
 use crate::telemetry::TELEMETRY;
 
 /// i2c address of the display
@@ -87,8 +88,25 @@ pub async fn display_task(i2c: I2c<'static, I2C0, Async>) {
     Timer::after_secs(2).await;
     lcd.clear(&mut delay).unwrap();
 
+    let mut rx = STATE.receiver().unwrap();
     loop {
-        display_gas(&mut lcd, &mut delay).await;
         Timer::after_secs(2).await;
+        let state = rx.get().await;
+        match state {
+            State::Alert(alert_type) => {
+                write_line(DisplayLine::Top, "ALERT!!!", &mut lcd, &mut delay).await;
+                match alert_type {
+                    AlertType::Gas => {
+                        write_line(DisplayLine::Bottom, "Gas level danger", &mut lcd, &mut delay).await;
+                    },
+                    AlertType::Temperature => {
+                        write_line(DisplayLine::Bottom, "Temperature danger", &mut lcd, &mut delay).await;
+                    }
+                }
+                continue;
+            },
+            _ => {}
+        }
+        display_gas(&mut lcd, &mut delay).await;
     }
 }

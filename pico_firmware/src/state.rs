@@ -11,12 +11,13 @@ use embassy_time::Timer;
 
 const BUZZER_TIMEOUT_MS: u64 = 250;
 
+#[derive(Clone, PartialEq)]
 pub enum AlertType {
     Gas,
     Temperature,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum State {
     /// Default state
     Idle,
@@ -25,7 +26,7 @@ pub enum State {
     Warning,
 
     /// Son...
-    Alert,
+    Alert(AlertType),
 }
 
 /// Current state
@@ -48,7 +49,7 @@ pub async fn buzzer_alert(mut pin: Output<'static>) {
             State::Warning => {
                 // TODO
             }
-            State::Alert => {
+            State::Alert(_) => {
                 let buzzer_future = async {
                     pin.set_high();
                     Timer::after_millis(BUZZER_TIMEOUT_MS).await;
@@ -91,7 +92,7 @@ pub async fn rgb_status(mut red: Output<'static>, mut green: Output<'static>, mu
                 green.set_high();
                 blue.set_high();
             },
-            State::Alert => {
+            State::Alert(_) => {
                 red.set_high();
                 green.set_low();
                 blue.set_low();
