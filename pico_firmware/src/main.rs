@@ -5,6 +5,7 @@ mod state;
 mod lcd;
 mod telemetry;
 mod gas;
+mod temp_hum;
 
 use defmt_rtt as _;
 use panic_probe as _;
@@ -13,7 +14,7 @@ use embassy_executor::Spawner;
 
 use embassy_rp::bind_interrupts;
 use embassy_rp::adc::{Adc, Channel, Config as AdcConfig, InterruptHandler as AdcInterruptHandler};
-use embassy_rp::gpio::{Level, Output, Pull};
+use embassy_rp::gpio::{Flex, Level, Output, Pull};
 use embassy_rp::i2c::{Config as I2cConfig, I2c, InterruptHandler as I2cInterruptHandler};
 use embassy_rp::peripherals;
 
@@ -52,4 +53,8 @@ async fn main(spawner: Spawner) {
     let adc = Adc::new(p.ADC, Irqs, AdcConfig::default());
     let adc_pin = Channel::new_pin(p.PIN_26, Pull::Down);
     spawner.spawn(gas::read_gas(adc, adc_pin).unwrap());
+
+    // Setup DHT11
+    let dht_flex_pin = Flex::new(p.PIN_15);
+    spawner.spawn(temp_hum::read_dht11(dht_flex_pin).unwrap());
 }

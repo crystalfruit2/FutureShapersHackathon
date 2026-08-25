@@ -12,10 +12,11 @@ bench = false
 [dependencies]
 # Embassy
 embassy-executor = { version = "0.10", features = ["defmt", "platform-cortex-m", "executor-thread"] }
-embassy-rp = { version = "0.10.0", features = ["rp235xa", "defmt", "critical-section-impl", "time-driver"] }
+embassy-rp = { version = "0.10.0", features = ["rp2040", "defmt", "critical-section-impl", "time-driver"] }
 embassy-time = { version = "0.5.1", features = ["defmt"] }
 embassy-sync = "0.8.0"
 embassy-futures = "0.1.2"
+embassy-dht-sensor = { version = "0.2.9", default-features = false, features = ["dht1x", "rp_no_pio", "rp2040"] }
 
 # Logs & panic
 defmt = "1.1.1"

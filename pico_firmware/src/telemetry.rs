@@ -8,12 +8,16 @@ use defmt::info;
 #[derive(Clone, Debug, defmt::Format)]
 pub struct Telemetry {
     pub gas: Option<u16>,
+    pub temperature: Option<f32>,
+    pub humidity: Option<f32>,
 }
 
 impl Telemetry {
     pub const fn new() -> Self {
         Self {
             gas: None,
+            temperature: None,
+            humidity: None,
         }
     }
 }
