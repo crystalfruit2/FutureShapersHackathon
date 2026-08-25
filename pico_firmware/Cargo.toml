@@ -25,3 +25,7 @@ panic-probe = "1.0.0"
 # Cortex-M
 cortex-m = { version = "0.7.7", features = ["inline-asm"] }
 cortex-m-rt = "0.7.5"
+
+# Disply driver
+hd44780-driver = "0.4.0"
+heapless = "0.9.3"
