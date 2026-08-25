@@ -29,7 +29,7 @@ pub enum State {
 }
 
 /// Current state
-pub static STATE: Watch<CriticalSectionRawMutex, State, 1> = Watch::new();
+pub static STATE: Watch<CriticalSectionRawMutex, State, 2> = Watch::new();
 
 #[embassy_executor::task]
 pub async fn buzzer_alert(mut pin: Output<'static>) {

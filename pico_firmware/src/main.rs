@@ -1,10 +1,10 @@
 #![no_std]
 #![no_main]
-extern crate alloc;
 
 mod state;
 mod lcd;
 mod telemetry;
+mod gas;
 
 use defmt_rtt as _;
 use panic_probe as _;
@@ -12,14 +12,16 @@ use panic_probe as _;
 use embassy_executor::Spawner;
 
 use embassy_rp::bind_interrupts;
-use embassy_rp::gpio::{Level, Output};
-use embassy_rp::i2c::{Config, I2c, InterruptHandler};
+use embassy_rp::adc::{Adc, Channel, Config as AdcConfig, InterruptHandler as AdcInterruptHandler};
+use embassy_rp::gpio::{Level, Output, Pull};
+use embassy_rp::i2c::{Config as I2cConfig, I2c, InterruptHandler as I2cInterruptHandler};
 use embassy_rp::peripherals;
 
 use defmt::info;
 
 bind_interrupts!(struct Irqs {
-    I2C0_IRQ => InterruptHandler<peripherals::I2C0>;
+    ADC_IRQ_FIFO => AdcInterruptHandler;
+    I2C0_IRQ => I2cInterruptHandler<peripherals::I2C0>;
 });
 
 #[embassy_executor::main]
@@ -40,9 +42,14 @@ async fn main(spawner: Spawner) {
     // LCD setup
     let sda = p.PIN_16;
     let scl = p.PIN_17;
-    let i2c = I2c::new_async(p.I2C0, scl, sda, Irqs, Config::default());
+    let i2c = I2c::new_async(p.I2C0, scl, sda, Irqs, I2cConfig::default());
     spawner.spawn(lcd::display_task(i2c).unwrap());
 
     // Setup telemetry broker
     spawner.spawn(telemetry::gather().unwrap());
+
+    // Setup gas sensor
+    let adc = Adc::new(p.ADC, Irqs, AdcConfig::default());
+    let adc_pin = Channel::new_pin(p.PIN_26, Pull::Down);
+    spawner.spawn(gas::read_gas(adc, adc_pin).unwrap());
 }
