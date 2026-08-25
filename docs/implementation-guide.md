@@ -8,6 +8,33 @@ date: 2026-08-25
 
 # Implementation Guide — step by step
 
+## ⚠️ 25.08 UPDATE — the 5 extra sensors are NOT provided
+Organizers confirmed on-site: no MQ4, no MQ135, no PIR, no KY-026 flame, no KY-020 tilt. Sanctioned workaround: simulate via potentiometer or keyboard input. Substitution map (firmware already implements it — every channel can be HARDWARE or SIM, same code path):
+
+| Missing | Replacement | Notes |
+|---|---|---|
+| MQ4 (pit methane) | potentiometer on A0 | knob = gas level; perfectly controllable demo; say honestly "production = MQ4/Manning EC-FX" |
+| MQ135 (hall ammonia) | `SIM|nh3=<val>` from dashboard slider | keyboard injection, organizer-sanctioned |
+| PIR (motion) | HC-SR04 ultrasonic as presence detector | matches the pen-plan (night robbery watch); silo-level role dropped |
+| KY-026 flame | `SIM|flame=1` (optional: photoresistor as light-spike detector) | A2 defaults to thermistor instead — dual-temp spoof check is worth more (cyber points) |
+| KY-020 tilt | push button wired as cabinet door-contact switch on D2 | real BMS cabinets use door contacts — pitch it as MORE realistic |
+
+Pitch line: "Our sensor abstraction treats hardware and injected channels identically — which is also our spoofing test harness." Turns the handicap into a cyber feature.
+
+### Pin map — Plan A′ (revised for no-extra-sensors)
+| Pin | Function | | Pin | Function |
+|---|---|---|---|---|
+| D0/D1 | ⛔ RESERVED — serial dashboard | | D9 | buzzer (bit-banged, no tone() if IR in use) |
+| D2 | cabinet door-contact button (tamper) | | D10 | red alarm LED |
+| D3 | IR receiver (attacker's channel, optional) | | D11/D12 | HC-SR04 trig/echo (night motion) |
+| D4 | DHT11 | | D13 | green/status (onboard) |
+| D5 | relay (gas valve / heater cut) | | A0 | potentiometer = "MQ4" gas |
+| D6 | servo (vent flap) | | A1 | water level sensor |
+| D7 | fan via transistor | | A2 | thermistor (2nd temp channel → spoof check) |
+| D8 | sound sensor (digital out) | | A3 | 4-button PIN ladder |
+| | | | A4/A5 | I2C LCD (if backpack; else 74HC595) |
+| SIM-only channels | NH3 (`nh3`), flame (`flame`) — injected from dashboard | | | |
+
 The same machine powers every pitch option (church / non-religious option / dorm fallback) — only zone labels, the cardboard model, and the narration change. Build once, skin at the end.
 
 ## 0. What you need (gather Tuesday morning)
@@ -23,7 +50,7 @@ The same machine powers every pitch option (church / non-religious option / dorm
 2. **Inventory the kit** against the list above — the I2C-LCD and relay-channel questions decide the pin map.
 3. **Write the pin map on paper and tape it to the table.** Nobody wires outside the map. Teams lose entire hours to pin conflicts discovered live.
 
-### Pin map — Plan A (recommended: 4-button PIN pad on one analog pin)
+### Pin map — Plan A (SUPERSEDED by Plan A′ above — kept for reference)
 The full 4x4 keypad eats 8 pins and the UNO simply cannot fit keypad + all sensors + all actuators (we counted). A resistor-ladder button pad (4 push buttons + kit resistors on ONE analog pin) keeps real PIN auth and frees 7 pins:
 
 | Pin | Function | | Pin | Function |
