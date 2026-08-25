@@ -15,6 +15,7 @@ const BUZZER_TIMEOUT_MS: u64 = 250;
 pub enum AlertType {
     Gas,
     Temperature,
+    Humidity,
 }
 
 #[derive(Clone, PartialEq)]

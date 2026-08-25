@@ -102,6 +102,9 @@ pub async fn display_task(i2c: I2c<'static, I2C0, Async>) {
                     AlertType::Temperature => {
                         write_line(DisplayLine::Bottom, "Temperature danger", &mut lcd, &mut delay).await;
                     }
+                    AlertType::Humidity => {
+                        write_line(DisplayLine::Bottom, "Humidity level danger", &mut lcd, &mut delay).await;
+                    }
                 }
                 continue;
             },
