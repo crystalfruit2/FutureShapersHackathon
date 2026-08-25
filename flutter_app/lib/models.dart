@@ -53,7 +53,8 @@ const zoneMetrics = {
 /// flat firmware/wire key -> zone-scoped app key
 const flatToZone = {
   'nh3': 'hall.nh3', 't1': 'hall.temp', 't2': 'hall.temp2', 'hum': 'hall.hum',
-  'gas': 'hall.gas', 'water': 'hall.water', 'snd': 'hall.sound',
+  'gas': 'hall.gas', 'water': 'hall.water', 'food': 'hall.food',
+  'light': 'hall.light', 'snd': 'hall.sound',
   'mot': 'field.motion', 'flame': 'stor.fire', 'tamp': 'ctrl.motion',
 };
 

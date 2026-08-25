@@ -263,9 +263,9 @@ class _ShellState extends State<Shell> {
       Scaffold(
         body: IndexedStack(index: _tab, children: const [
           HomeScreen(),
+          ControlsScreen(),
           EventsScreen(),
           ForecastScreen(),
-          ControlsScreen(),
         ]),
         bottomNavigationBar: NavigationBar(
           selectedIndex: _tab,
@@ -275,9 +275,9 @@ class _ShellState extends State<Shell> {
           height: 64,
           destinations: const [
             NavigationDestination(icon: Icon(Icons.grid_view_rounded), label: 'Farm'),
+            NavigationDestination(icon: Icon(Icons.tune_rounded), label: 'Controls'),
             NavigationDestination(icon: Icon(Icons.query_stats_rounded), label: 'Activity'),
             NavigationDestination(icon: Icon(Icons.online_prediction_rounded), label: 'Forecast'),
-            NavigationDestination(icon: Icon(Icons.tune_rounded), label: 'Controls'),
           ],
         ),
       ),

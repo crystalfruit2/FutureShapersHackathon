@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../main.dart';
-import '../models.dart';
 import 'theme.dart';
 
 class ControlsScreen extends StatefulWidget {
@@ -61,45 +60,25 @@ class _ControlsScreenState extends State<ControlsScreen> {
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Row(children: [
                 Expanded(
-                  child: SegmentedButton<FarmMode>(
-                    segments: const [
-                      ButtonSegment(
-                          value: FarmMode.day,
-                          label: Text('Day'),
-                          icon: Icon(Icons.wb_sunny_outlined, size: 18)),
-                      ButtonSegment(
-                          value: FarmMode.night,
-                          label: Text('Night watch'),
-                          icon: Icon(Icons.nightlight_outlined, size: 18)),
-                    ],
-                    selected: {
-                      app.mode == FarmMode.night ? FarmMode.night : FarmMode.day
-                    },
-                    onSelectionChanged: (s) {
-                      if (s.first == FarmMode.night) {
-                        app.command('ARM');
-                      } else {
-                        _askPin(context, app); // disarming needs the user PIN
-                      }
-                    },
-                    style: ButtonStyle(
-                      side: WidgetStatePropertyAll(
-                          BorderSide(color: T.hairline)),
-                    ),
-                  ),
-                ),
-              ]),
-              const SizedBox(height: 14),
-              Row(children: [
-                Expanded(
                   child: _Toggle(
-                    label: 'Exhaust fan',
-                    icon: Icons.air,
-                    on: app.tel.v('fan') == 1,
-                    onChanged: (v) => app.command(v ? 'FAN_ON' : 'FAN_OFF'),
+                    label: 'Light',
+                    icon: Icons.lightbulb_outlined,
+                    on: app.tel.v('hall.light') == 1,
+                    onChanged: (v) => app.command(v ? 'LIGHT_ON' : 'LIGHT_OFF'),
                   ),
                 ),
                 const SizedBox(width: 10),
+                Expanded(
+                  child: _Toggle(
+                    label: 'Fan',
+                    icon: Icons.wind_power_outlined,
+                    on: app.tel.v('cfan') == 1,
+                    onChanged: (v) => app.command(v ? 'CFAN_ON' : 'CFAN_OFF'),
+                  ),
+                ),
+              ]),
+              const SizedBox(height: 10),
+              Row(children: [
                 Expanded(
                   child: _Toggle(
                     label: 'Vent flap',
@@ -108,6 +87,49 @@ class _ControlsScreenState extends State<ControlsScreen> {
                     onChanged: (_) => app.command('VENT'),
                   ),
                 ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: _Toggle(
+                    label: 'Exhaust fan',
+                    icon: Icons.air,
+                    on: app.tel.v('fan') == 1,
+                    onChanged: (v) => app.command(v ? 'FAN_ON' : 'FAN_OFF'),
+                  ),
+                ),
+              ]),
+              const SizedBox(height: 10),
+              Row(children: [
+                Expanded(
+                  child: _RefillTile(
+                    label: 'Water refill',
+                    icon: Icons.water_drop_outlined,
+                    level: app.tel.v('hall.water'),
+                    onTap: () => app.command('REFILL_WATER'),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: _RefillTile(
+                    label: 'Food refill',
+                    icon: Icons.rice_bowl_outlined,
+                    level: app.tel.v('hall.food'),
+                    onTap: () => app.command('REFILL_FOOD'),
+                  ),
+                ),
+              ]),
+              const SizedBox(height: 10),
+              Row(children: [
+                Expanded(
+                  child: _Toggle(
+                    label: 'Sprinkler',
+                    icon: Icons.shower_outlined,
+                    on: app.tel.v('spr') == 1,
+                    onChanged: (v) =>
+                        app.command(v ? 'SPRINKLER_ON' : 'SPRINKLER_OFF'),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                const Expanded(child: SizedBox()),
               ]),
             ]),
           ),
@@ -222,89 +244,39 @@ class _ControlsScreenState extends State<ControlsScreen> {
   }
 }
 
-void _askPin(BuildContext context, AppState app) {
-  showModalBottomSheet(
-    context: context,
-    backgroundColor: T.surface,
-    shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-    builder: (_) => ChangeNotifierProvider.value(value: app, child: const _PinSheet()),
-  );
-}
 
-/// 4-button PIN pad — deliberately the same four keys as the physical
-/// panel's resistor-ladder pad ("authentication & access layers").
-class _PinSheet extends StatefulWidget {
-  const _PinSheet();
-  @override
-  State<_PinSheet> createState() => _PinSheetState();
-}
-
-class _PinSheetState extends State<_PinSheet> {
-  final _digits = <int>[];
-  String? _error;
-
-  void _tap(int d) {
-    if (_digits.length >= 4) return;
-    setState(() => _digits.add(d));
-    if (_digits.length == 4) {
-      final r = context.read<AppState>().tryDisarm(List.of(_digits));
-      switch (r) {
-        case PinResult.ok:
-          Navigator.pop(context);
-        case PinResult.wrong:
-          setState(() { _digits.clear(); _error = 'Wrong PIN'; });
-        case PinResult.locked:
-          setState(() { _digits.clear(); _error = 'Locked out — try again in 30 s'; });
-      }
-    }
-  }
+class _RefillTile extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final double level;
+  final VoidCallback onTap;
+  const _RefillTile(
+      {required this.label, required this.icon, required this.level,
+       required this.onTap});
 
   @override
-  Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.fromLTRB(24, 20, 24, 40),
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Text('Enter PIN to disarm', style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 4),
-          Text('Same code as the control-room panel',
-              style: Theme.of(context).textTheme.bodySmall),
-          const SizedBox(height: 18),
-          Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-            for (var i = 0; i < 4; i++)
-              Container(
-                width: 14, height: 14,
-                margin: const EdgeInsets.symmetric(horizontal: 7),
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: i < _digits.length ? T.accent : Colors.transparent,
-                  border: Border.all(color: i < _digits.length ? T.accent : T.hairline, width: 1.5),
-                ),
-              ),
-          ]),
-          if (_error != null) ...[
-            const SizedBox(height: 10),
-            Text(_error!, style: const TextStyle(color: T.danger, fontSize: 13, fontWeight: FontWeight.w600)),
-          ],
-          const SizedBox(height: 18),
-          Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-            for (var d = 1; d <= 4; d++)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 6),
-                child: SizedBox(
-                  width: 64, height: 64,
-                  child: OutlinedButton(
-                    style: OutlinedButton.styleFrom(
-                        shape: const CircleBorder(),
-                        side: const BorderSide(color: T.hairline),
-                        foregroundColor: T.text),
-                    onPressed: () => _tap(d),
-                    child: Text('$d', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w600)),
-                  ),
-                ),
-              ),
-          ]),
+  Widget build(BuildContext context) {
+    final low = level < 20;
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: low ? T.warn : T.hairline),
+        ),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Icon(icon, size: 20, color: low ? T.warn : T.sub),
+          const SizedBox(height: 8),
+          Text(label, style: Theme.of(context).textTheme.bodyMedium),
+          Text('${level.round()}% · tap to refill',
+              style: TextStyle(
+                  fontSize: 13, color: low ? T.warn : T.sub,
+                  fontWeight: FontWeight.w600)),
         ]),
-      );
+      ),
+    );
+  }
 }
 
 class _Toggle extends StatelessWidget {

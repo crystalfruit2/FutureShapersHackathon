@@ -197,9 +197,9 @@ SCRIPTS = {"gas_ramp":script_gas_ramp, "replay":script_replay,
            "slow_creep":script_slow_creep, "nh3_drift":script_nh3_drift}
 
 # ── fake-data generator ──────────────────────────────────────────────────
-fake = {"gas":120,"nh3":8,"flame":0,"t1":24,"t2":24,"hum":55,"water":600,
-        "mot":0,"snd":0,"tamp":0,"fan":0,"relay":1,"vent":0,"mode":"DAY",
-        "ctr":0, "sim":set(["nh3","flame"])}
+fake = {"gas":120,"nh3":8,"flame":0,"t1":24,"t2":24,"hum":55,"water":72,"food":58,
+        "mot":0,"snd":0,"tamp":0,"fan":0,"relay":1,"vent":0,"cfan":0,"spr":0,
+        "light":1,"mode":"DAY","ctr":0, "sim":set(["nh3","flame"])}
 
 def fake_rx(s: str):
     if s.startswith("SIM|"):
@@ -218,6 +218,18 @@ def fake_rx(s: str):
         elif action == "FAN_ON": fake["fan"] = 1
         elif action == "FAN_OFF": fake["fan"] = 0
         elif action == "VENT": fake["vent"] ^= 1
+        elif action == "CFAN_ON": fake["cfan"] = 1
+        elif action == "CFAN_OFF": fake["cfan"] = 0
+        elif action == "LIGHT_ON": fake["light"] = 1
+        elif action == "LIGHT_OFF": fake["light"] = 0
+        elif action == "SPRINKLER_ON": fake["spr"] = 1
+        elif action == "SPRINKLER_OFF": fake["spr"] = 0
+        elif action == "REFILL_WATER":
+            fake["water"] = 100
+            handle_line("EVT|0|hall|WATER_REFILLED|100|INFO")
+        elif action == "REFILL_FOOD":
+            fake["food"] = 100
+            handle_line("EVT|0|hall|FOOD_REFILLED|100|INFO")
         elif action == "DUMPLOG":
             for i,(w,c) in enumerate([("BOOT","OK"),("MODE","OK"),("GAS","OK"),("CMD_REJECT","OK")]):
                 state["log"].append({"slot":i,"what":w,"val":"0","min":str(i),"chain":c})
@@ -249,8 +261,9 @@ def fake_loop():
         if f["mot"] and f["mode"] == "NIGHT":
             handle_line("EVT|0|perim|INTRUDER|1|ALERT"); f["mot"] = 0
         tel = ",".join(f"{k}={int(f[k])}{'s' if k in f['sim'] else ''}"
-                       for k in ("gas","nh3","flame","t1","t2","hum","water","mot","snd","tamp"))
-        handle_line(f"TEL|{tel},fan={f['fan']},relay={f['relay']},vent={f['vent']},saved_pct={random.randint(60,70)}")
+                       for k in ("gas","nh3","flame","t1","t2","hum","water","food","light","mot","snd","tamp"))
+        handle_line(f"TEL|{tel},fan={f['fan']},relay={f['relay']},vent={f['vent']},"
+                    f"cfan={f['cfan']},spr={f['spr']},saved_pct={random.randint(60,70)}")
         time.sleep(1)
 
 # ── Tier-2 analyst: prediction · baseline drift · plausibility ───────────

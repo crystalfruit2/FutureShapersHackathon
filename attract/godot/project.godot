@@ -1,0 +1,18 @@
+config_version=5
+
+[application]
+config/name="Bio Guard — Attract Loop"
+run/main_scene="res://Main.tscn"
+config/features=PackedStringArray("4.7", "GL Compatibility")
+
+[display]
+window/size/viewport_width=320
+window/size/viewport_height=180
+window/size/window_width_override=1280
+window/size/window_height_override=720
+window/stretch/mode="viewport"
+window/stretch/aspect="keep"
+
+[rendering]
+textures/canvas_textures/default_texture_filter=0
+renderer/rendering_method="gl_compatibility"

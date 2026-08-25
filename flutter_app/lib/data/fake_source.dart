@@ -18,7 +18,7 @@ class FakeDataSource implements StrajerDataSource {
   FarmMode _mode = FarmMode.day;
   FarmMode _modeBeforeEmergency = FarmMode.day;
   double _fanOnSec = 0, _totalSec = 0;
-  double _fan = 0, _relay = 1, _vent = 0;
+  double _fan = 0, _relay = 1, _vent = 0, _cfan = 0, _spr = 0;
 
   FakeDataSource() {
     final now = DateTime.now();
@@ -101,12 +101,13 @@ class FakeDataSource implements StrajerDataSource {
     final anyFire = zoneMetrics.keys.any((z) => (_v['$z.fire'] ?? 0) >= 1);
     if ((gasMax >= 700 || anyFire) && _mode != FarmMode.emergency) {
       _relay = 0; _fan = 1; _vent = 1;
+      if (anyFire) _spr = 1; // sprinkler auto-fires on flame
       _modeBeforeEmergency = _mode;
       _setMode(FarmMode.emergency);
       _emitEvent(anyFire ? 'stor' : 'hall', anyFire ? 'FLAME_DETECTED' : 'GAS_CRITICAL',
           anyFire ? 1 : gasMax.round(), Severity.emerg);
     } else if (gasMax < 400 && !anyFire && _mode == FarmMode.emergency) {
-      _relay = 1;
+      _relay = 1; _spr = 0;
       _setMode(_modeBeforeEmergency); // a night-armed farm stays armed
       _emitEvent('hall', 'GAS_CLEARED', gasMax.round(), Severity.info);
     }
@@ -121,11 +122,15 @@ class FakeDataSource implements StrajerDataSource {
 
     _totalSec++;
     if (_fan > 0) _fanOnSec++;
-    final saved = _totalSec == 0 ? 0 : (100 - _fanOnSec * 100 / _totalSec).round();
+    _pushTel();
+  }
 
+  void _pushTel() {
+    final saved = _totalSec == 0 ? 0 : (100 - _fanOnSec * 100 / _totalSec).round();
     _ctrl.add(TelMsg(Telemetry({
       for (final e in _v.entries) e.key: Chan(e.value, simulated: _sim.contains(e.key)),
       'fan': Chan(_fan), 'relay': Chan(_relay), 'vent': Chan(_vent),
+      'cfan': Chan(_cfan), 'spr': Chan(_spr),
       'saved_pct': Chan(saved.toDouble()),
     })));
   }
@@ -146,6 +151,18 @@ class FakeDataSource implements StrajerDataSource {
       case 'FAN_ON': _fan = 1;
       case 'FAN_OFF': _fan = 0;
       case 'VENT': _vent = _vent == 1 ? 0 : 1;
+      case 'CFAN_ON': _cfan = 1;
+      case 'CFAN_OFF': _cfan = 0;
+      case 'LIGHT_ON': _v['hall.light'] = 1;
+      case 'LIGHT_OFF': _v['hall.light'] = 0;
+      case 'SPRINKLER_ON': _spr = 1;
+      case 'SPRINKLER_OFF': _spr = 0;
+      case 'REFILL_WATER':
+        _v['hall.water'] = 100;
+        _emitEvent('hall', 'WATER_REFILLED', 100, Severity.info);
+      case 'REFILL_FOOD':
+        _v['hall.food'] = 100;
+        _emitEvent('hall', 'FOOD_REFILLED', 100, Severity.info);
       case 'DUMPLOG':
         _ctrl.add(AuditMsg([
           const AuditRecord(0, 'BOOT', '0', '0', 'OK'),
@@ -154,6 +171,7 @@ class FakeDataSource implements StrajerDataSource {
           const AuditRecord(3, 'CMD_REJECT', '1', '15', 'OK'),
         ]));
     }
+    _pushTel(); // reflect actuator changes immediately, not on the next tick
   }
 
   @override
