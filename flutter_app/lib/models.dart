@@ -20,12 +20,18 @@ class Chan {
   const Chan(this.value, {this.simulated = false});
 }
 
-/// zone ids -> display names (order = display order on the Farm page)
+/// zone ids -> display names. The Farm page renders zoneMetrics.keys; the
+/// extra ids here are the LIVE bridge's zone vocabulary (pit/store/perim/farm)
+/// so event tiles and the emergency overlay never fall back to raw ids.
 const zoneNames = {
   'hall': 'Poultry hall',
   'field': 'Field',
   'stor': 'Storage room',
   'ctrl': 'Control room',
+  'pit': 'Manure pit',
+  'store': 'Feed & water store',
+  'perim': 'Perimeter',
+  'farm': 'Farm',
 };
 
 /// metric ids -> (label, unit). Booleans render as yes/no chips.

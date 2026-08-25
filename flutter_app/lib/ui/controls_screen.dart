@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../main.dart';
+import '../models.dart';
 import 'theme.dart';
 
 class ControlsScreen extends StatefulWidget {
@@ -136,6 +137,40 @@ class _ControlsScreenState extends State<ControlsScreen> {
           const SectionLabel('Security'),
           Panel(
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    icon: Icon(
+                        app.mode == FarmMode.night || app.mode == FarmMode.lockdown
+                            ? Icons.lock_open_outlined
+                            : Icons.shield_moon_outlined,
+                        size: 18),
+                    label: Text(
+                        app.mode == FarmMode.night || app.mode == FarmMode.lockdown
+                            ? 'Disarm — PIN'
+                            : 'Arm night watch'),
+                    style: OutlinedButton.styleFrom(
+                        foregroundColor:
+                            app.mode == FarmMode.night ? T.warn : T.text,
+                        side: BorderSide(
+                            color: app.mode == FarmMode.night
+                                ? T.warn
+                                : T.hairline),
+                        padding: const EdgeInsets.symmetric(vertical: 12)),
+                    onPressed: () {
+                      if (app.mode == FarmMode.night ||
+                          app.mode == FarmMode.lockdown) {
+                        showDialog(
+                            context: context,
+                            builder: (_) => const PinDialog());
+                      } else {
+                        app.command('ARM');
+                      }
+                    },
+                  ),
+                ),
+              ]),
+              const SizedBox(height: 12),
               Text('Every command is signed with a rolling counter. Try to spoof one:',
                   style: Theme.of(context).textTheme.bodySmall),
               const SizedBox(height: 12),
@@ -353,6 +388,89 @@ class _BenchButton extends StatelessWidget {
           Text(label,
               style: const TextStyle(fontSize: 11.5), textAlign: TextAlign.center),
         ]),
+      );
+}
+
+/// Disarming needs the user PIN (arming does not) — the app-side auth layer
+/// that AppState.tryDisarm already implements: 3 misses -> 30 s lockout.
+class PinDialog extends StatefulWidget {
+  const PinDialog({super.key});
+  @override
+  State<PinDialog> createState() => _PinDialogState();
+}
+
+class _PinDialogState extends State<PinDialog> {
+  final _ctrl = TextEditingController();
+  String? _error;
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final app = context.read<AppState>();
+    final digits =
+        _ctrl.text.trim().split('').map(int.tryParse).toList();
+    if (digits.length != 4 || digits.any((d) => d == null)) {
+      setState(() => _error = 'Enter the 4-digit PIN');
+      return;
+    }
+    switch (app.tryDisarm(digits.cast<int>())) {
+      case PinResult.ok:
+        Navigator.of(context).pop();
+      case PinResult.wrong:
+        setState(() {
+          _error = 'Wrong PIN (${app.pinFails}/3)';
+          _ctrl.clear();
+        });
+      case PinResult.locked:
+        setState(() {
+          _error = 'Too many attempts — locked for 30 s';
+          _ctrl.clear();
+        });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+        backgroundColor: T.surface,
+        title: const Text('Disarm night watch', style: TextStyle(fontSize: 17)),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextField(
+            controller: _ctrl,
+            autofocus: true,
+            obscureText: true,
+            maxLength: 4,
+            keyboardType: TextInputType.number,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+                fontSize: 22, letterSpacing: 12, fontFamily: 'Menlo'),
+            decoration: InputDecoration(
+              counterText: '',
+              hintText: '····',
+              enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: const BorderSide(color: T.hairline)),
+              focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: const BorderSide(color: T.accent)),
+            ),
+            onSubmitted: (_) => _submit(),
+          ),
+          if (_error != null) ...[
+            const SizedBox(height: 10),
+            Text(_error!,
+                style: const TextStyle(color: T.danger, fontSize: 13)),
+          ],
+        ]),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel')),
+          FilledButton(onPressed: _submit, child: const Text('Disarm')),
+        ],
       );
 }
 

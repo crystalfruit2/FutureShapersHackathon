@@ -110,6 +110,9 @@ class _EventsScreenState extends State<EventsScreen> {
 
 String _detail(StrajerEvent e) {
   if (e.raw.startsWith('SEC|')) return 'Cyber defense · command refused';
+  // AI lines carry their farmer copy in parts[4] — the tile title already
+  // shows it, so the detail is just the zone
+  if (e.raw.startsWith('AI|')) return zoneNames[e.zone] ?? e.zone;
   final zone = zoneNames[e.zone] ?? (e.zone.isEmpty ? '' : e.zone);
   final val = e.parts.length > 4 ? e.parts[4] : '';
   return [if (zone.isNotEmpty) zone, if (val.isNotEmpty && val != '0') 'value $val']

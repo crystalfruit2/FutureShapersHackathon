@@ -36,6 +36,7 @@ class AppState extends ChangeNotifier {
   int pinFails = 0;
   DateTime? pinLockUntil;
   String _ackedEmergKey = ''; // zone+type that was acknowledged
+  DateTime? _leftEmergencyAt; // flap guard: mode briefly leaving+re-entering EMERGENCY is the same episode
   DateTime _lastEmergSound = DateTime.fromMillisecondsSinceEpoch(0);
   Timer? _secTimer;
   StrajerEvent? lastSec; // latest cyber event, for the toast
@@ -50,7 +51,10 @@ class AppState extends ChangeNotifier {
     useFake(); // always boot into demo data; user switches to live in Controls
   }
 
+  int _epoch = 0; // bumped per source; a scene started on an old source aborts
+
   void _attach(StrajerDataSource s) {
+    _epoch++;
     _sub?.cancel();
     _source?.dispose();
     _source = s;
@@ -58,6 +62,16 @@ class AppState extends ChangeNotifier {
     audit = [];
     tel = const Telemetry({});
     mode = FarmMode.unknown;
+    // per-connection / per-episode state must not leak across a source switch:
+    // a stale green "Live" chip, or an ack from Demo swallowing a real live
+    // emergency inside the flap window
+    connected = false;
+    connDetail = 'Connecting…';
+    emergencyAcked = false;
+    _ackedEmergKey = '';
+    _leftEmergencyAt = null;
+    _secTimer?.cancel();
+    lastSec = null;
     _sub = s.messages.listen(_onMsg);
     s.start();
     notifyListeners();
@@ -71,9 +85,11 @@ class AppState extends ChangeNotifier {
   Future<void> useBridge(String url) async {
     usingBridge = true;
     bridgeUrl = url;
+    // attach first, persist after — awaiting prefs before _attach let a fast
+    // Live→Demo tap sequence end with the bridge attached under a "Demo" chip
+    _attach(BridgeDataSource(url));
     final p = await SharedPreferences.getInstance();
     await p.setString('bridgeUrl', url);
-    _attach(BridgeDataSource(url));
   }
 
   void _onMsg(SourceMsg m) {
@@ -84,11 +100,32 @@ class AppState extends ChangeNotifier {
         final was = mode;
         mode = m.mode;
         if (mode == FarmMode.emergency && was != FarmMode.emergency) {
-          emergencyAcked = false;
-          _ackedEmergKey = '';
-          HapticFeedback.heavyImpact();
+          // a firmware that oscillates out of and back into EMERGENCY within a
+          // few seconds is the same episode — don't undo the farmer's ack;
+          // a genuinely different emergency still re-raises via the event key
+          final flap = _leftEmergencyAt != null &&
+              DateTime.now().difference(_leftEmergencyAt!) <
+                  const Duration(seconds: 5);
+          if (!flap) {
+            emergencyAcked = false;
+            _ackedEmergKey = '';
+            HapticFeedback.heavyImpact();
+          }
+        } else if (was == FarmMode.emergency && mode != FarmMode.emergency) {
+          _leftEmergencyAt = DateTime.now();
         }
       case EventMsg():
+        // ACK|<ctr> / NAK|<ctr> are protocol plumbing, not farmer events —
+        // rendered raw they become tiles titled with a bare counter number
+        if (m.event.raw.startsWith('ACK|') || m.event.raw.startsWith('NAK|')) {
+          break;
+        }
+        // the bridge's hello replays recent events on every SSE reconnect;
+        // without dedup a few Wi-Fi blips multiply the incident log
+        if (m.history &&
+            events.any((e) => e.raw == m.event.raw && e.time == m.event.time)) {
+          break;
+        }
         events.insert(0, m.event);
         if (events.length > 400) events.removeLast();
         if (!m.history) {
@@ -179,7 +216,12 @@ class AppState extends ChangeNotifier {
     if (sceneRunning) return;
     sceneRunning = true;
     notifyListeners();
-    Future<void> wait(int s) => Future.delayed(Duration(seconds: s));
+    final ep = _epoch; // switching Demo↔Live mid-scene must abort the scene,
+    // not retarget its remaining SIM injections at the other source
+    Future<void> wait(int s) async {
+      await Future.delayed(Duration(seconds: s));
+      if (ep != _epoch) throw _SceneAborted();
+    }
     try {
       switch (n) {
         case 1: // central control: mode round-trip
@@ -214,6 +256,8 @@ class AppState extends ChangeNotifier {
           await wait(2);
           await command('DUMPLOG');
       }
+    } on _SceneAborted {
+      // source switched mid-scene — stop cleanly, inject nothing further
     } finally {
       sceneRunning = false;
       notifyListeners();
@@ -288,3 +332,5 @@ class _ShellState extends State<Shell> {
 }
 
 enum PinResult { ok, wrong, locked }
+
+class _SceneAborted implements Exception {}

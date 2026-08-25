@@ -55,6 +55,16 @@ class FakeDataSource implements StrajerDataSource {
           'EVT|${DateTime.now().millisecondsSinceEpoch % 100000}|$zone|$type|$val|${sev.name.toUpperCase()}',
           _now, sev)));
 
+  // leaving emergency via a mode command must release the actuators too,
+  // or the valve cut / sprinkler latch forever (the tick's recovery branch
+  // only runs while mode is still emergency)
+  void _exitEmergency() {
+    if (_mode == FarmMode.emergency) {
+      _relay = 1;
+      _spr = 0;
+    }
+  }
+
   void _setMode(FarmMode m) {
     if (m == _mode) return;
     _mode = m;
@@ -146,8 +156,8 @@ class FakeDataSource implements StrajerDataSource {
   Future<void> command(String action) async {
     _ctr++;
     switch (action) {
-      case 'ARM': _setMode(FarmMode.night);
-      case 'DISARM': _setMode(FarmMode.day);
+      case 'ARM': _exitEmergency(); _setMode(FarmMode.night);
+      case 'DISARM': _exitEmergency(); _setMode(FarmMode.day);
       case 'FAN_ON': _fan = 1;
       case 'FAN_OFF': _fan = 0;
       case 'VENT': _vent = _vent == 1 ? 0 : 1;

@@ -26,7 +26,7 @@ pip3 install flask pyserial
 python3 dashboard/app.py --fake                    # no Arduino needed — build UI now
 python3 dashboard/app.py --port /dev/cu.usbmodem*  # against real hardware
 ```
-→ http://localhost:5000 — floor plan (4 zones), live telemetry with SIM badges,
+→ http://localhost:5001 — floor plan (4 zones), live telemetry with SIM badges,
 event log, energy-saved tally, sim sliders (NH₃/flame/motion = the "keyboard
 simulation"), **⚔ REPLAY ATTACK button** (the live cyber demo), chained-log verify.
 Verified working in fake mode incl. replay rejection.

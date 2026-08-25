@@ -17,3 +17,33 @@ Quick look at one moment: `python3 render.py --still 20`
 
 Not part of the demo system — separate files, touches no firmware and no dashboard state,
 so it sits outside the Wed 14:00 feature freeze.
+
+## Godot port (`godot/`)
+
+Same 40 s beat sheet, rebuilt in Godot 4.7 so the loop can be tweaked in an editor
+instead of a Python file. **Not interactive — it is the same silent attract loop.**
+The mp4 above is still what plays on the day; this is the convenience layer.
+
+`Main.tscn` is the source of truth — edit it in the Godot editor, or as text.
+`build_scene.py` is the scaffolding that built it and now refuses to run without
+`--force`, because running it would discard editor work. It stays as the readable
+record of how every node was derived from `render.py`.
+
+- twelve spot frames: `Godot --path . res://Shots.tscn` → `shots/`
+- the whole loop: `Godot --path . res://Record.tscn -- <outdir> 24 40` → 960 PNGs,
+  then the same ffmpeg line as above. `Record.gd` seeks frame by frame so it is
+  deterministic; Godot's own Movie Maker under-reported frames and stalled here.
+
+What the engine buys over `render.py`, all of it inspector-tweakable:
+
+| | where | knob |
+| --- | --- | --- |
+| real 2D lighting instead of pasted glow blobs | `World/LampLight` … `BarnTop` | `energy`, `texture_scale`, `Flicker.gd` exports |
+| procedural twinkling starfield (`sky.png` never had stars — `render.py` redrew them every frame, so the port lost them) | `World/Sky/SkyArt` material | `density`, `twinkle` |
+| parallax depth on sky + both hill layers | `World/Sky`, `Far`, `Near` | `scroll_scale` |
+| fireflies, barn dust, chimney smoke | `Fireflies`, `BarnDust`, `Smoke` | `amount`, `color_ramp` |
+| vignette | `Grade/Vignette` | `strength` |
+| CRT scanlines on the dashboard beat | `Dashboard/Crt` | `scan`, `sweep` |
+
+Camera and door motion is baked to **linear** keys on purpose: Godot's cubic value
+interpolation overshoots between equal keyframes and threw the camera off the world.

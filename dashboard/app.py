@@ -95,12 +95,17 @@ def handle_line(line: str, from_serial=False):
         events.append(ev)
         publish({"type":"event", "event":ev})
     elif parts[0] == "LOG":
-        if parts[1] == "END":
-            publish({"type":"log", "log":state["log"]}); state["log"] = []
-        elif len(parts) >= 6:
-            state["log"].append({"slot":int(parts[1]),
-                "what":LOG_TYPES.get(int(parts[2]) if parts[2].isdigit() else -1, parts[2]),
-                "val":parts[3], "min":parts[4], "chain":parts[5]})
+        # a garbled LOG fragment (common on Arduino port-open reset) must never
+        # escape into reader_loop's catch-all and drop the serial link
+        try:
+            if parts[1] == "END":
+                publish({"type":"log", "log":state["log"]}); state["log"] = []
+            elif len(parts) >= 6:
+                state["log"].append({"slot":int(parts[1]),
+                    "what":LOG_TYPES.get(int(parts[2]) if parts[2].isdigit() else -1, parts[2]),
+                    "val":parts[3], "min":parts[4], "chain":parts[5]})
+        except (IndexError, ValueError):
+            pass
 
 def send_raw(s: str):
     push_raw("tx", s)
@@ -109,7 +114,12 @@ def send_raw(s: str):
         except Exception as e:
             publish({"type":"serial", "connected":False, "port":ser_port, "detail":f"write failed: {e}"})
     elif fake_on:
-        fake_rx(s)
+        try:
+            fake_rx(s)
+        except (ValueError, KeyError, IndexError):
+            # garbage from the raw-line box must be *rejected*, not a 500 —
+            # same contract the real firmware promises for malformed input
+            handle_line("SEC|CMD_REJECTED|MALFORMED")
 
 # ── serial management (test-bench core) ──────────────────────────────────
 def list_ports():
@@ -249,15 +259,19 @@ def fake_loop():
         f["t1"] = 24 + random.randint(-1, 1)
         f["t2"] = f["t1"] + random.choice([0, 0, 1])
         if f["gas"] >= 700 and f["mode"] != "EMERGENCY":
+            f["premode"] = f["mode"]   # a night-armed farm stays armed after the episode
             f["mode"] = "EMERGENCY"; f["relay"] = 0; f["fan"] = 1; f["vent"] = 1
             handle_line(f"EVT|0|pit|GAS_CRITICAL|{int(f['gas'])}|EMERG")
             handle_line("STATE|EMERGENCY")
-        if f["gas"] < 400 and f["mode"] == "EMERGENCY":
-            f["mode"] = "DAY"; f["relay"] = 1
-            handle_line("EVT|0|pit|GAS_CLEARED|0|INFO"); handle_line("STATE|DAY")
+        if f["gas"] < 400 and not f["flame"] and f["mode"] == "EMERGENCY":
+            f["mode"] = f.get("premode", "DAY"); f["relay"] = 1; f["spr"] = 0
+            handle_line("EVT|0|pit|GAS_CLEARED|0|INFO"); handle_line(f"STATE|{f['mode']}")
         if f["flame"] and f["mode"] != "EMERGENCY":
-            f["mode"] = "EMERGENCY"
+            f["premode"] = f["mode"]
+            f["mode"] = "EMERGENCY"; f["relay"] = 0; f["fan"] = 1; f["vent"] = 1; f["spr"] = 1
             handle_line("EVT|0|store|FLAME_DETECTED|1|EMERG"); handle_line("STATE|EMERGENCY")
+        if f["nh3"] >= 25:
+            f["fan"] = 1               # auto ventilation — mirrors the app's fake source
         if f["mot"] and f["mode"] == "NIGHT":
             handle_line("EVT|0|perim|INTRUDER|1|ALERT"); f["mot"] = 0
         tel = ",".join(f"{k}={int(f[k])}{'s' if k in f['sim'] else ''}"
@@ -373,7 +387,10 @@ class Analyst:
             st["n"] += 1
             st["rise"] = st["rise"] + 1 if st["slope"] > 0 else 0
             # frozen-channel counter only advances while the rest of the farm moves
-            st["stuck"] = st["stuck"] + 1 if (moved and st["last"] == v) else 0
+            # a slider-pinned SIM channel is *supposed* to sit still — only a real
+            # (or fake-generated) channel going flat means a dead/replayed probe
+            st["stuck"] = st["stuck"] + 1 if (moved and st["last"] == v
+                                              and not tel[k].get("sim")) else 0
             st["last"] = v
             if self.learning and not emerg:
                 st["bn"] += 1; st["bsum"] += v; st["bsq"] += v * v
@@ -570,13 +587,27 @@ def raw():
     send_raw(request.json["line"].strip())
     return {"ok": True}
 
+script_busy = {"name": None}   # two interleaved scripts fight over SIM|gas
+
+def _run_script(name):
+    try:
+        SCRIPTS[name]()
+    finally:
+        script_busy["name"] = None
+
 @app.route("/script", methods=["POST"])
 def script():
     name = request.json["name"]
     if name not in SCRIPTS: return {"ok": False}, 404
+    if script_busy["name"]:
+        events.append({"raw":f"DASH|'{script_busy['name']}' still running — wait for it to finish",
+                       "t":now_t(), "sev":"INFO"})
+        publish({"type":"event","event":events[-1]})
+        return {"ok": False, "err": "script running"}, 409
+    script_busy["name"] = name
     events.append({"raw":f"DASH|test sequence: {name}", "t":now_t(), "sev":"INFO"})
     publish({"type":"event","event":events[-1]})
-    threading.Thread(target=SCRIPTS[name], daemon=True).start()
+    threading.Thread(target=_run_script, args=(name,), daemon=True).start()
     return {"ok": True}
 
 @app.route("/cmd", methods=["POST"])
@@ -592,8 +623,14 @@ def cmd():
 @app.route("/attack", methods=["POST"])
 def attack():
     with lock:
-        c, a = last_sent["counter"], last_sent["action"] or "FAN_OFF"
-        if not last_sent["counter"]: c = 1
+        if not last_sent["counter"]:
+            # nothing captured yet — forging counter 1 would make the "attack"
+            # pass the replay check and actually execute (the exact anti-demo)
+            events.append({"raw":"DASH|replay attack needs a captured command — send one first",
+                           "t":now_t(), "sev":"INFO"})
+            publish({"type":"event","event":events[-1]})
+            return {"ok": False, "err": "send a command first"}
+        c, a = last_sent["counter"], last_sent["action"]
         send_raw(f"CMD|{c}|{mac_for(c, a)}|{a}")
     return {"ok": True}
 
@@ -785,7 +822,7 @@ function onTel(t){
  if(t.saved_pct)el('energy').textContent=t.saved_pct.v+'%';
  el('z-pit').className='zone'+(t.gas&&t.gas.v>=700?' alert':t.gas&&t.gas.v>=450?' warn':'');
  el('z-hall').className='zone'+(t.nh3&&t.nh3.v>=25?' warn':'');
- el('z-store').className='zone'+(t.flame&&t.flame.v>0?' alert':(t.water&&t.water.v<200?' warn':''));
+ el('z-store').className='zone'+(t.flame&&t.flame.v>0?' alert':(t.water&&t.water.v<20?' warn':''));
  el('z-ctrl').className='zone'+(t.tamp&&t.tamp.v?' alert':'');
 }
 function onAi(a){
@@ -815,7 +852,7 @@ function onEvent(e,old){const d=document.createElement('div');d.className=e.sev;
  d.textContent=`${e.t}  ${e.raw}`;el('log').prepend(d);
  if(old)return;
  const p=e.raw.split('|');
- if(p[0]==='AI'){if(el('banner').className!=='EMERG'&&(e.sev==='ALERT'||e.sev==='WARN'))
+ if(p[0]==='AI'){if(el('banner').className!=='EMERG'&&el('banner').className!=='ALERT'&&(e.sev==='ALERT'||e.sev==='WARN'))
    banner('AIB','AI ANALYST: '+(p[4]||''));return;}
  if(e.sev==='EMERG')banner('EMERG','EMERGENCY: '+(p[3]||'')+' — zone '+(p[2]||'?'));
  else if(e.sev==='ALERT')banner('ALERT','ALERT: '+(p[3]||'')+' — '+(p[2]||''));
@@ -833,7 +870,8 @@ es.onmessage=ev=>{const m=JSON.parse(ev.data);
  else if(m.type=='log')onLog(m.log);
  else if(m.type=='ai')onAi(m.ai);
  else if(m.type=='serial')onSerial(m);
- else if(m.type=='hello'){onMode(m.state.mode);onTel(m.state.tel||{});
+ else if(m.type=='hello'){el('log').innerHTML='';el('console').innerHTML='';
+   onMode(m.state.mode);onTel(m.state.tel||{});
    (m.events||[]).forEach(e=>onEvent(e,true));(m.raws||[]).forEach(onRaw);
    onCounters(m.counters||{rx:0,tx:0,unparsed:0});onSerial(m.serial||{});
    if(m.ai)onAi(m.ai);}};

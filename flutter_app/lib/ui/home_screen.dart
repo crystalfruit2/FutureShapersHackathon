@@ -19,8 +19,10 @@ class HomeScreen extends StatelessWidget {
           const SizedBox(height: 14),
           if (anomalies.isNotEmpty) _AnomalyBanner(anomalies: anomalies),
           if (anomalies.isEmpty) _AllQuiet(app: app),
+          const SizedBox(height: 10),
+          _FlockCalm(app: app),
           const SectionLabel('Zones'),
-          for (final z in zoneNames.keys) ...[
+          for (final z in zoneMetrics.keys) ...[
             _ZoneCard(zone: z, app: app),
             const SizedBox(height: 10),
           ],
@@ -142,6 +144,50 @@ class _AllQuiet extends StatelessWidget {
         Expanded(
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Text(title, style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 2),
+            Text(caption, style: Theme.of(context).textTheme.bodySmall),
+          ]),
+        ),
+      ]),
+    );
+  }
+}
+
+/// Welfare read derived from sensors nothing else surfaces together:
+/// hall sound activity + motion. Cheap signal, real farmer value.
+class _FlockCalm extends StatelessWidget {
+  final AppState app;
+  const _FlockCalm({required this.app});
+
+  @override
+  Widget build(BuildContext context) {
+    final noisy = app.tel.v('hall.sound') >= 1;
+    final moving =
+        app.tel.v('hall.motion') >= 1 || app.tel.v('field.motion') >= 1;
+    final (label, caption, color, icon) = switch ((noisy, moving)) {
+      (true, true) => ('Flock distressed',
+          'Noise and movement together — check the hall',
+          T.danger, Icons.notifications_active_outlined),
+      (true, false) => ('Flock restless',
+          'Unusual sound activity in the hall', T.warn, Icons.graphic_eq),
+      (false, true) => ('Flock stirring',
+          'Movement without noise — likely normal', T.warn,
+          Icons.directions_walk_outlined),
+      (false, false) => ('Flock calm',
+          'Sound and movement inside the normal band', T.ok,
+          Icons.spa_outlined),
+    };
+    return Panel(
+      child: Row(children: [
+        Icon(icon, size: 20, color: color),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(label,
+                style: Theme.of(context)
+                    .textTheme
+                    .titleMedium
+                    ?.copyWith(color: color)),
             const SizedBox(height: 2),
             Text(caption, style: Theme.of(context).textTheme.bodySmall),
           ]),

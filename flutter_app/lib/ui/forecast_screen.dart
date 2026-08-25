@@ -20,7 +20,11 @@ class _Advice {
 }
 
 _Advice _adviceFrom(List<Point>? outTemp) {
-  final src = outTemp ?? demoForecast('temp', 24);
+  // non-null-but-empty happens when every hourly time filters out (e.g. a
+  // wrong device clock) — .first on it would red-screen the whole tab
+  final src = (outTemp == null || outTemp.isEmpty)
+      ? demoForecast('temp', 24)
+      : outTemp;
   var peak = src.first, low = src.first;
   for (final p in src) {
     if (p.v > peak.v) peak = p;
