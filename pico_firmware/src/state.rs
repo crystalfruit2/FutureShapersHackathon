@@ -16,6 +16,7 @@ pub enum AlertType {
     Gas,
     Temperature,
     Humidity,
+    WaterLevel,
 }
 
 #[derive(Clone, PartialEq)]
