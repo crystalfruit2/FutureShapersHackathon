@@ -32,7 +32,7 @@ bind_interrupts!(struct Irqs {
 });
 
 const WIFI_AP_SSID: &str = "BioGuard";
-const WIFI_AP_PASSWORD: &str = "team2";
+const WIFI_AP_PASSWORD: &str = "claude_plan";
 const WIFI_AP_CHANNEL: u8 = 5;
 
 const AP_IP: Ipv4Address = Ipv4Address::new(192, 168, 4, 1);
