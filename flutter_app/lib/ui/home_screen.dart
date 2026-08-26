@@ -67,7 +67,7 @@ class _Header extends StatelessWidget {
   Widget build(BuildContext context) => Padding(
         padding: const EdgeInsets.only(top: 8),
         child: Row(children: [
-          Text('Bio Guard', style: Theme.of(context).textTheme.headlineMedium),
+          Text('BioGuard', style: Theme.of(context).textTheme.headlineMedium),
           const Spacer(),
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),

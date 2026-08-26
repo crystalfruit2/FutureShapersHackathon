@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -12,6 +13,7 @@ import 'ui/controls_screen.dart';
 import 'ui/forecast_screen.dart';
 import 'ui/emergency_overlay.dart';
 import 'ui/events_screen.dart';
+import 'ui/fleet_screen.dart';
 import 'ui/home_screen.dart';
 import 'ui/theme.dart';
 
@@ -47,7 +49,8 @@ class AppState extends ChangeNotifier {
 
   Future<void> _restorePrefs() async {
     final p = await SharedPreferences.getInstance();
-    bridgeUrl = p.getString('bridgeUrl') ?? bridgeUrl;
+    // on web the app is served BY the bridge — same origin is the bridge URL
+    bridgeUrl = p.getString('bridgeUrl') ?? (kIsWeb ? Uri.base.origin : bridgeUrl);
     useFake(); // always boot into demo data; user switches to live in Controls
   }
 
@@ -294,7 +297,7 @@ class StrajerApp extends StatelessWidget {
   Widget build(BuildContext context) => ChangeNotifierProvider(
         create: (_) => AppState(),
         child: MaterialApp(
-          title: 'Bio Guard',
+          title: 'BioGuard',
           debugShowCheckedModeBanner: false,
           theme: T.theme(),
           home: const Shell(),
@@ -309,7 +312,7 @@ class Shell extends StatefulWidget {
 }
 
 class _ShellState extends State<Shell> {
-  int _tab = 0;
+  int _tab = 4; // TEMP-SCREENSHOT
 
   @override
   Widget build(BuildContext context) {
@@ -323,6 +326,7 @@ class _ShellState extends State<Shell> {
           ControlsScreen(),
           EventsScreen(),
           ForecastScreen(),
+          FleetScreen(),
         ]),
         bottomNavigationBar: NavigationBar(
           selectedIndex: _tab,
@@ -335,6 +339,7 @@ class _ShellState extends State<Shell> {
             NavigationDestination(icon: Icon(Icons.tune_rounded), label: 'Controls'),
             NavigationDestination(icon: Icon(Icons.query_stats_rounded), label: 'Activity'),
             NavigationDestination(icon: Icon(Icons.online_prediction_rounded), label: 'Forecast'),
+            NavigationDestination(icon: Icon(Icons.cloud_outlined), label: 'Fleet'),
           ],
         ),
       ),

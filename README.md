@@ -1,4 +1,4 @@
-# Bio Guard (scenario: Ferma Străjer) — FutureShapers Hackathon 2026 (Honeywell, Bucharest)
+# BioGuard (scenario: Ferma Străjer) — FutureShapers Hackathon 2026 (Honeywell, Bucharest)
 
 Smart livestock-facility supervisory node. Arduino UNO R3 + Bitmi kit.
 **25.08 constraint:** the 5 extra sensors (MQ4/MQ135/PIR/flame/tilt) were NOT provided —
@@ -61,6 +61,65 @@ AI ANALYST panel = live per-channel trend, ETA and σ, plus RELEARN BASELINE (re
 "normal" in *this* room — good demo beat). Two demo sequences in the bench panel:
 **AI · SLOW GAS CREEP** (predicted ~60 s before the reflex layer fires) and
 **AI · NH₃ DRIFT** (caught while staying under the fixed limit).
+
+## Cloud — Tier 3 (`dashboard/cloud/`, no extra deps)
+One node proves the product works; a fleet proves it's a business. The bridge is the farm
+**gateway**: it mirrors what the Pi node reports into Firestore under a farm id, so many farms land in
+one project and the model gets to learn from all of them at once. Same three-layer line as
+above, one layer longer: **reflex** (ms, on the Pi node) · **perception** (1 Hz, on the laptop) ·
+**fleet** (hours, in the cloud).
+
+Zero new pip installs — `cryptography` + `requests` were already there, so `store.py` signs
+the service-account JWT itself and speaks the Firestore REST API directly. A
+`pip install firebase-admin` that has to succeed on venue Wi-Fi is not a dependency we accept.
+
+**With no credentials at all it still runs.** `LocalStore` is a JSON file with the same
+interface, the same data, the same model and the same console — it just isn't shared between
+machines. Losing the internet costs telemetry *resolution*, never the node and never the demo.
+
+| layer | what the cloud earns that one node can't |
+| --- | --- |
+| history | 30 days per farm instead of the 45 s baseline the on-site analyst learns |
+| fleet model | a new customer inherits the fleet's learned weights on **day one**, before contributing a row of their own |
+| regional signal | correlated distress across neighbouring farms — one farm reads its own feed drop as a feeder fault; three farms in one county on one day is a notifiable disease pattern |
+
+The risk model is a hand-rolled logistic regression over an 11-feature, 3-hour window,
+predicting an alert-grade incident **6 h ahead**. Honesty guards, because a model demoed on
+data invented to flatter it is a lie:
+- `seed.py` is a crude barn *simulator*, not a random-number source with the answer baked in —
+  ammonia is a stock (`dNH₃/dt = prod − NH₃/τ`) that accumulates and is removed by ventilation,
+  so every incident is the END of a physical build-up. That is *why* 6-hour warning is possible.
+- training reweights the rare positives to 50/50 to learn them at all, then **shifts the
+  log-odds back by the true base rate** at inference — without that correction an obvious
+  build-up printed a flat `100%`.
+- z-scores are clamped at ±4σ, so a 15-second stage ramp can't extrapolate to a confident
+  number with no evidence behind it.
+- a forecast is suppressed unless its projected rise clears the channel's own noise, and no
+  ETA past 12 h is shown at all.
+- **quote the held-out number, not the training AUC.** `validate.py` trains on three farms and
+  scores the fourth, which is exactly the claim being made.
+
+```
+python3 -m cloud.seed --days 30 --wipe   # 4 farms x 30 d, ~3 300 docs, then trains
+python3 -m cloud.validate                # leave-one-farm-out -> mean held-out AUC 0.915
+python3 app.py --fake                    # /cloud is now live alongside / and /app/
+```
+
+`/cloud` = fleet console: KPI strip, regional banner, a card per farm with its risk, the
+model's own per-feature reasons for that risk, the time-to-threshold forecast and a
+30-day sparkline; tap a farm for its stored daily history and event log. Buttons retrain on
+whatever is actually in the cloud and re-run the held-out validation live.
+
+To point it at a real project (all optional — unset means LocalStore):
+```
+export BIOGUARD_FIREBASE_KEY=/path/to/service-account.json
+export BIOGUARD_FARM_ID=strajer-01          # which farm this gateway is
+export BIOGUARD_CLOUD=auto                  # on | off | auto
+```
+The Flutter **Fleet** tab reads Firestore *directly* (paste the web config into
+`lib/firebase_options.dart`), so on a phone over mobile data it needs no laptop in the loop;
+if Firebase can't initialise it transparently falls back to the bridge's `/cloud/api/fleet`,
+which serves the identical shape.
 
 ## Firmware test bench — how we test Oleksandr's firmware (Tue/Wed)
 `dashboard/app.py` doubles as the test bench. With the UNO plugged into the laptop:

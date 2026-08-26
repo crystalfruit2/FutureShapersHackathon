@@ -23,6 +23,25 @@ import argparse, glob, json, queue, random, threading, time
 from collections import deque
 from flask import Flask, Response, request
 
+# ── cloud layer (optional) ───────────────────────────────────────────────
+# The bridge is the farm GATEWAY: it mirrors what it sees into Firestore under
+# a farm id so many farms land in one project. Import failure is survivable by
+# construction — the demo path must not depend on the cloud existing.
+try:
+    from cloud.sink import SINK as CLOUD_SINK
+    from cloud.console import bp as cloud_bp
+    CLOUD_OK = True
+except Exception as _e:                                   # noqa: BLE001
+    CLOUD_OK = False
+    _CLOUD_ERR = _e
+    class _NoCloud:
+        def on_telemetry(self, *a, **k): pass
+        def on_event(self, *a, **k): pass
+        def on_mode(self, *a, **k): pass
+        def start(self): pass
+        def snapshot(self): return {"error": str(_e)}
+    CLOUD_SINK = _NoCloud()
+
 SECRET = b"STRAJER26"          # must match SECRET in the firmware
 
 def crc8(data: bytes, crc: int = 0) -> int:
@@ -62,20 +81,37 @@ def fw_sig(ver: str) -> int:
 def sec_event(line: str):
     handle_line(f"SEC|{line}")
 
+def send_signed(action: str):
+    """Sign and send one command to the device with the bridge's counter."""
+    global cmd_counter
+    with lock:
+        cmd_counter += 1
+        last_sent.update(counter=cmd_counter, action=action)
+        c = cmd_counter
+    send_raw(f"CMD|{c}|{mac_for(c, action)}|{action}")
+
 def enter_lockdown(reason: str):
     if security["lockdown"]: return
     security["lockdown"] = True
+    sec_event(f"LOCKDOWN|{reason}")
+    if ser:
+        # real device (Pi node): it forces fan ON / pump OFF and emits
+        # its own EVT + STATE|LOCKDOWN back up this same channel
+        send_signed("LOCKDOWN")
+        return
     if fake_on:
         if fake["mode"] not in ("LOCKDOWN", "EMERGENCY"):
             fake["premode"] = fake["mode"]
         fake["mode"] = "LOCKDOWN"; fake["fan"] = 1; fake["spr"] = 0
-    sec_event(f"LOCKDOWN|{reason}")
     handle_line("EVT|0|ctrl|LOCKDOWN|3|ALERT")
     handle_line("STATE|LOCKDOWN")
 
 def clear_lockdown():
     security["lockdown"] = False
     security["pin_fails"] = 0
+    if ser:
+        send_signed("UNLOCK")     # node restores its pre-lockdown mode
+        return
     if fake_on and fake["mode"] == "LOCKDOWN":
         fake["mode"] = fake.get("premode", "DAY")
     sec_event("LOCKDOWN_CLEARED|ADMIN_PIN")
@@ -120,15 +156,18 @@ def handle_line(line: str, from_serial=False):
         state["tel"] = tel
         publish({"type":"tel", "tel":tel})
         analyst.ingest(tel)          # Tier-2 perception layer (advisory only)
+        CLOUD_SINK.on_telemetry(tel, state["mode"])   # Tier-3: fleet (fail-open)
     elif parts[0] == "STATE" and len(parts) > 1:
         state["mode"] = parts[1]
         publish({"type":"state", "mode":parts[1]})
+        CLOUD_SINK.on_mode(parts[1])
     elif parts[0] in ("EVT","SEC","ACK","NAK","AI"):
         ev = {"raw":line, "t":now_t(),
               "sev": parts[5] if parts[0] in ("EVT","AI") and len(parts)>5 else
                      ("SEC" if parts[0]=="SEC" else "INFO")}
         events.append(ev)
         publish({"type":"event", "event":ev})
+        CLOUD_SINK.on_event(ev)
     elif parts[0] == "LOG":
         # a garbled LOG fragment (common on Arduino port-open reset) must never
         # escape into reader_loop's catch-all and drop the serial link
@@ -157,18 +196,27 @@ def send_raw(s: str):
             handle_line("SEC|CMD_REJECTED|MALFORMED")
 
 # ── serial management (test-bench core) ──────────────────────────────────
+pi_host = None                # set by --pi; offered in the port picker
+
 def list_ports():
+    ports = []
+    if pi_host:
+        ports.append({"device": f"socket://{pi_host}:7777",
+                      "desc": "BioGuard Pi node (TCP)"})
     try:
         from serial.tools import list_ports as lp
-        return [{"device":p.device, "desc":p.description} for p in lp.comports()]
+        ports += [{"device":p.device, "desc":p.description} for p in lp.comports()]
     except Exception:
-        return [{"device":d, "desc":""} for d in glob.glob("/dev/cu.usb*")]
+        ports += [{"device":d, "desc":""} for d in glob.glob("/dev/cu.usb*")]
+    return ports
 
 def reader_loop(port, baud):
     global ser, ser_port
     import serial
     try:
-        ser = serial.Serial(port, baud, timeout=1)
+        # serial_for_url: normal /dev/... paths behave exactly like Serial(),
+        # and socket://host:7777 reaches the Raspberry Pi node over TCP
+        ser = serial.serial_for_url(port, baudrate=baud, timeout=1)
     except Exception as e:
         publish({"type":"serial", "connected":False, "port":port, "detail":str(e)})
         return
@@ -313,7 +361,16 @@ def fake_loop():
             # mean-reverting around ambient: a sealed pit doesn't wander to 500 on its own,
             # and a free random walk would let the analyst forecast a leak that isn't there
             f["gas"] = max(80, f["gas"] + (120 - f["gas"]) * 0.15 + random.uniform(-5, 5))
-        f["t1"] = 24 + random.randint(-1, 1)
+        # A fire heats the building. A flat 24 C during a flame event is what
+        # made our own tier-2 analyst flag our own dispatch as "sensor fault or
+        # spoofed input" -- the thermal channel is what corroborates the flame
+        # pin, so it has to actually move.
+        if f["flame"]:
+            f["t1"] = min(64.0, float(f["t1"]) + random.uniform(1.2, 2.0))
+        elif float(f["t1"]) > 25.5:
+            f["t1"] = max(24.0, float(f["t1"]) - random.uniform(0.8, 1.4))
+        else:
+            f["t1"] = 24 + random.randint(-1, 1)
         f["t2"] = f["t1"] + random.choice([0, 0, 1])
         if f["gas"] >= 700 and f["mode"] != "EMERGENCY":
             f["premode"] = f["mode"]   # a night-armed farm stays armed after the episode
@@ -606,6 +663,12 @@ analyst = Analyst()
 # ── flask ────────────────────────────────────────────────────────────────
 app = Flask(__name__)
 
+if CLOUD_OK:
+    app.register_blueprint(cloud_bp)      # /cloud + /cloud/api/*
+    CLOUD_SINK.start()
+else:
+    print(f"[cloud] disabled: {_CLOUD_ERR}")
+
 @app.route("/stream")
 def stream():
     q = queue.Queue(maxsize=200)
@@ -748,7 +811,7 @@ def index():
 def fire():
     return FIRE_PAGE
 
-# Bio Guard web app (flutter build web), served same-origin at /app/
+# BioGuard web app (flutter build web), served same-origin at /app/
 import os
 from flask import send_from_directory
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -761,59 +824,107 @@ def flutter_web(path="index.html"):
 
 PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Bio Guard — Bridge & Test Bench</title>
+<title>BioGuard — Bridge & Test Bench</title>
 <style>
- :root{--bg:#0d1117;--card:#161b22;--line:#30363d;--tx:#e6edf3;--dim:#8b949e;
-       --ok:#3fb950;--warn:#d29922;--alert:#f85149;--sim:#a371f7;--acc:#58a6ff}
- *{box-sizing:border-box;font-family:ui-monospace,Menlo,monospace}
- body{margin:0;background:var(--bg);color:var(--tx);padding:12px}
- h1{font-size:18px;margin:0 0 4px} .dim{color:var(--dim);font-size:12px}
- .row{display:flex;gap:12px;flex-wrap:wrap;margin-top:12px}
- .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px;flex:1;min-width:300px}
- #mode{font-size:26px;font-weight:bold;padding:8px 16px;border-radius:8px;display:inline-block}
- .DAY{background:#1f6feb33;color:#58a6ff}.NIGHT{background:#6e40c933;color:var(--sim)}
- .EMERGENCY{background:#f8514933;color:var(--alert);animation:bl 1s infinite}
- .LOCKDOWN{background:#d2992233;color:var(--warn)}
+ /* Industrial control-room skin (ISA-101-flavored): status colors mean STATE
+    and nothing else; sans-serif for chrome, monospace only for wire data. */
+ :root{--bg:#0B0E12;--card:#151A21;--inset:#0A0D11;--line:#28313D;--edge:#33404F;
+       --tx:#F2F6FA;--dim:#95A1AF;--ok:#35C46F;--warn:#F0A72E;--alert:#FF5449;
+       --sim:#B18CFF;--acc:#41A8FF;
+       --sans:"Avenir Next","Segoe UI",system-ui,-apple-system,sans-serif;
+       --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+ *{box-sizing:border-box}
+ body{margin:0;background:var(--bg);color:var(--tx);padding:14px 16px;
+   font-family:var(--sans);font-size:13.5px}
+ #topbar{display:flex;align-items:center;justify-content:space-between;gap:12px;
+   flex-wrap:wrap;padding:2px 2px 12px;border-bottom:1px solid var(--line)}
+ .brand{display:flex;align-items:center;gap:11px}
+ .brand-tick{width:4px;height:36px;background:var(--acc);border-radius:2px}
+ .brand-name{font-weight:800;font-size:19px;line-height:1;letter-spacing:.14em}
+ .brand-sub{font-size:11.5px;color:var(--dim);margin-top:4px;letter-spacing:.02em}
+ .topbar-right{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+ .navlink{color:var(--alert);font-weight:700;font-size:11px;letter-spacing:.08em;
+   text-decoration:none;border:1px solid var(--alert);border-radius:4px;padding:6px 11px}
+ .navlink:hover{background:#FF54491A}
+ .dim{color:var(--dim);font-size:12px}
+ .card>.dim:first-child{font-weight:700;font-size:10.5px;letter-spacing:.1em;
+   text-transform:uppercase;color:var(--dim)}
+ .row{display:flex;gap:14px;flex-wrap:wrap;margin-top:14px}
+ .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px;flex:1;min-width:300px}
+ #mode{display:block;text-align:center;font-weight:800;font-size:23px;letter-spacing:.13em;
+   padding:15px 10px;border-radius:6px;border:1px solid var(--line)}
+ .DAY{background:#123457;color:#8FC7FF;border-color:#1F5FA0!important}
+ .NIGHT{background:#291F50;color:#C9B8FF;border-color:#4A3A8C!important}
+ .EMERGENCY{background:#571512;color:#FFB4AE;border-color:var(--alert)!important;animation:bl 1s infinite;
+   background-image:repeating-linear-gradient(-45deg,transparent 0 12px,#FF544918 12px 24px)}
+ .LOCKDOWN{background:#453104;color:#FFD98A;border-color:var(--warn)!important;
+   background-image:repeating-linear-gradient(-45deg,transparent 0 12px,#F0A72E1C 12px 24px)}
  @keyframes bl{50%{opacity:.4}}
- .zones{display:grid;grid-template-columns:1fr 1fr;gap:8px}
- .zone{border:2px solid var(--line);border-radius:8px;padding:10px;min-height:84px}
- .zone h3{margin:0 0 6px;font-size:13px;color:var(--dim)}
- .zone.warn{border-color:var(--warn)} .zone.alert{border-color:var(--alert);animation:bl 1s infinite}
- .v{font-size:15px} .simtag{color:var(--sim);font-size:10px;border:1px solid var(--sim);border-radius:4px;padding:0 4px;margin-left:4px}
- button{background:#21262d;color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:8px 14px;cursor:pointer;font-size:13px;margin:2px}
- button:hover{background:#30363d} button.red{border-color:var(--alert);color:var(--alert)}
- button.acc{border-color:var(--acc);color:var(--acc)}
- select,input[type=text]{background:#0d1117;color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:8px;font-size:13px}
- #log{height:200px;overflow-y:auto;font-size:12px;line-height:1.5}
- #console{height:260px;overflow-y:auto;font-size:12px;line-height:1.45;background:#0a0d10;
-   border:1px solid var(--line);border-radius:6px;padding:8px;margin-top:8px}
- .rx{color:#7ee787}.tx{color:#79c0ff}.bad{color:var(--alert);font-weight:bold}
+ .zones{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+ .zone{background:var(--inset);border:1px solid var(--line);border-left:3px solid var(--edge);
+   border-radius:6px;padding:10px 12px;min-height:84px}
+ .zone h3{margin:0 0 7px;font-size:10.5px;font-weight:700;letter-spacing:.09em;color:var(--dim)}
+ .zone.warn{border-left-color:var(--warn)}
+ .zone.alert{border-left-color:var(--alert);animation:bl 1s infinite}
+ .v{font-family:var(--mono);font-size:13px;line-height:1.65;font-variant-numeric:tabular-nums}
+ .simtag{color:var(--sim);font-size:9.5px;font-family:var(--sans);font-weight:700;
+   border:1px solid var(--sim);border-radius:3px;padding:0 4px;margin-left:4px;letter-spacing:.05em}
+ button{background:#1C242E;color:var(--tx);border:1px solid var(--edge);border-radius:6px;
+   padding:8px 13px;cursor:pointer;font-family:var(--sans);font-weight:600;font-size:12px;
+   letter-spacing:.02em;margin:2px}
+ button:hover{background:#26303C;border-color:#4A5A6D}
+ button:active{transform:translateY(1px)}
+ button.red{border-color:#7A2B27;color:#FF8A82} button.red:hover{border-color:var(--alert);background:#2A1210}
+ button.acc{border-color:#1F5FA0;color:#8FC7FF} button.acc:hover{border-color:var(--acc);background:#0F2237}
+ select,input[type=text]{background:var(--inset);color:var(--tx);border:1px solid var(--edge);
+   border-radius:6px;padding:8px 10px;font-family:var(--mono);font-size:12.5px}
+ #log{height:200px;overflow-y:auto;font-family:var(--mono);font-size:11.5px;line-height:1.6}
+ #console{height:260px;overflow-y:auto;font-family:var(--mono);font-size:11.5px;line-height:1.5;
+   background:var(--inset);border:1px solid var(--line);border-radius:6px;padding:9px;margin-top:8px}
+ .rx{color:#7EE787}.tx{color:#79C0FF}.bad{color:var(--alert);font-weight:bold}
  .EMERG{color:var(--alert);font-weight:bold}.ALERT{color:var(--alert)}
  .WARN{color:var(--warn)}.SEC{color:var(--sim);font-weight:bold}.INFO{color:var(--dim)}
- input[type=range]{width:100%} .sl{margin:8px 0} .sl label{font-size:12px;color:var(--dim)}
- table{width:100%;font-size:12px;border-collapse:collapse}
- td,th{border-bottom:1px solid var(--line);padding:3px 6px;text-align:left}
+ input[type=range]{width:100%;accent-color:var(--acc)}
+ .sl{margin:9px 0} .sl label{font-size:11.5px;color:var(--dim);font-weight:600;letter-spacing:.03em}
+ table{width:100%;font-family:var(--mono);font-size:11.5px;border-collapse:collapse;
+   font-variant-numeric:tabular-nums}
+ td,th{border-bottom:1px solid var(--line);padding:4px 6px;text-align:left}
+ th{font-family:var(--sans);font-size:10px;font-weight:700;letter-spacing:.08em;
+   text-transform:uppercase;color:var(--dim)}
  .OK{color:var(--ok)}.BROKEN{color:var(--alert);font-weight:bold}
- #energy{font-size:30px;color:var(--ok);font-weight:bold}
- #banner{display:none;position:fixed;inset:0 0 auto 0;z-index:9;padding:18px;text-align:center;
-   font-size:22px;font-weight:bold;cursor:pointer}
- #banner.EMERG{display:block;background:var(--alert);color:#fff;animation:bl 1s infinite}
- #banner.ALERT{display:block;background:var(--warn);color:#000}
- #banner.SEC{display:block;background:var(--sim);color:#fff}
- .noenter{color:var(--alert);font-weight:bold;font-size:15px;border:2px dashed var(--alert);
-   border-radius:6px;padding:2px 6px;display:inline-block;margin-top:4px}
- .pill{display:inline-block;border:1px solid var(--line);border-radius:20px;padding:3px 10px;font-size:12px;margin-left:6px}
- .pill.on{border-color:var(--ok);color:var(--ok)} .pill.off{border-color:var(--warn);color:var(--warn)}
- .aitag{color:var(--acc);border:1px solid var(--acc);border-radius:4px;padding:0 5px;font-size:10px}
+ #energy{font-family:var(--mono);font-size:30px;color:var(--ok);font-weight:700}
+ #banner{display:none;position:fixed;inset:0 0 auto 0;z-index:9;padding:17px;text-align:center;
+   font-weight:800;font-size:20px;letter-spacing:.05em;cursor:pointer;
+   border-bottom:4px solid #0006}
+ #banner.EMERG{display:block;background:#C6362C;color:#fff;animation:bl 1s infinite}
+ #banner.ALERT{display:block;background:#C98A1B;color:#140D00}
+ #banner.SEC{display:block;background:#6D4FC4;color:#fff}
+ #banner.AIB{display:block;background:#1F6FB8;color:#EAF5FF}
+ .noenter{color:#FF8A82;font-weight:700;font-size:13px;font-family:var(--sans);
+   border:1px dashed var(--alert);border-radius:5px;padding:3px 8px;display:inline-block;margin-top:5px}
+ .pill{display:inline-block;border:1px solid var(--line);border-radius:4px;padding:3px 9px;
+   font-family:var(--mono);font-size:11px}
+ .pill.on{border-color:#1E5C38;color:#5FD68F;background:#0D2417}
+ .pill.off{border-color:#6B4E12;color:#F0C36A;background:#241A05}
+ .aitag{color:var(--acc);border:1px solid #1F5FA0;border-radius:3px;padding:0 5px;
+   font-size:9.5px;font-family:var(--sans);font-weight:700;letter-spacing:.05em}
  tr.ai-alert td{color:var(--alert)} tr.ai-predict td{color:var(--warn)}
  tr.ai-drift td,tr.ai-stuck td{color:var(--sim)}
- #banner.AIB{display:block;background:var(--acc);color:#04121f}
 </style></head><body>
 <div id="banner" onclick="this.className=''"></div>
-<h1>BIOGUARD <span class="dim">— bridge & firmware test bench</span>
- <span id="serialpill" class="pill off">serial: none</span>
- <span class="dim" id="stats"></span>
- <a href="/fire" target="_blank" style="float:right;color:var(--alert);font-size:12px;text-decoration:none;border:1px solid var(--alert);border-radius:20px;padding:3px 10px">🚒 fire-station screen</a></h1>
+<header id="topbar">
+ <div class="brand"><span class="brand-tick"></span>
+  <div>
+   <div class="brand-name">BIO GUARD</div>
+   <div class="brand-sub">Ferma Străjer — supervisory bridge &amp; firmware test bench</div>
+  </div>
+ </div>
+ <div class="topbar-right">
+  <span class="dim" id="stats" style="font-family:var(--mono);font-size:11px"></span>
+  <span id="serialpill" class="pill off">serial: none</span>
+  <a href="/fire" target="_blank" class="navlink">112 DISPATCH</a>
+ </div>
+</header>
 
 <div class="row">
  <div class="card" style="flex:2">
@@ -992,38 +1103,59 @@ FIRE_PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ISU Banat — Dispecerat 112</title>
 <style>
- :root{--bg:#07090d;--card:#10141b;--line:#242c38;--tx:#e6edf3;--dim:#7d8896;
-       --ok:#3fb950;--warn:#d29922;--alert:#f85149;--acc:#58a6ff;--red:#c62828}
- *{box-sizing:border-box;font-family:ui-monospace,Menlo,monospace}
- body{margin:0;background:var(--bg);color:var(--tx);padding:14px;overflow-x:hidden}
- h1{font-size:19px;margin:0;letter-spacing:1px}
+ /* 112 dispatch console — same industrial family as the bridge, night-shift
+    register: red is reserved for live incidents, the clock is always king. */
+ :root{--bg:#080B10;--card:#12171F;--inset:#0A0E14;--line:#26303C;--edge:#33404F;
+       --tx:#F2F6FA;--dim:#8E9AA8;--ok:#35C46F;--warn:#F0A72E;--alert:#FF5449;
+       --acc:#41A8FF;--red:#C6362C;
+       --sans:"Avenir Next","Segoe UI",system-ui,-apple-system,sans-serif;
+       --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+ *{box-sizing:border-box}
+ body{margin:0;background:var(--bg);color:var(--tx);padding:14px 16px;overflow-x:hidden;
+   font-family:var(--sans);font-size:13.5px}
+ #topbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;
+   padding:2px 2px 12px;border-bottom:1px solid var(--line)}
+ .brand{display:flex;align-items:center;gap:11px}
+ .brand-tick{width:4px;height:38px;background:var(--red);border-radius:2px}
+ .brand-name{font-weight:800;font-size:18px;line-height:1;letter-spacing:.1em}
+ .brand-sub{font-size:11.5px;color:var(--dim);margin-top:4px;letter-spacing:.03em}
+ .topbar-right{display:flex;align-items:center;gap:14px}
  .dim{color:var(--dim);font-size:12px}
+ .card>.dim:first-child{font-weight:700;font-size:10.5px;letter-spacing:.1em;
+   text-transform:uppercase;color:var(--dim)}
  .row{display:flex;gap:14px;flex-wrap:wrap;margin-top:14px}
- .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}
- .pill{display:inline-block;border:1px solid var(--line);border-radius:20px;padding:3px 12px;font-size:12px;margin-left:8px}
- .pill.on{border-color:var(--ok);color:var(--ok)}
- .pill.off{border-color:var(--warn);color:var(--warn)}
- #clock{float:right;font-size:26px;font-weight:bold;color:var(--acc)}
+ .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px}
+ .pill{display:inline-block;border:1px solid var(--line);border-radius:4px;padding:3px 10px;
+   font-family:var(--mono);font-size:11px}
+ .pill.on{border-color:#1E5C38;color:#5FD68F;background:#0D2417}
+ .pill.off{border-color:#6B4E12;color:#F0C36A;background:#241A05}
+ .pill.sim{border-color:#4A3357;color:#C9A6DE;background:#1C1224;letter-spacing:.4px}
+ #clock{font-family:var(--mono);font-size:30px;font-weight:700;color:var(--tx);
+   font-variant-numeric:tabular-nums;letter-spacing:.04em}
  @keyframes bl{50%{opacity:.35}}
- @keyframes ringpulse{0%{r:8;opacity:.9}100%{r:34;opacity:0}}
- .farm{fill:#2ea04366} .farm-core{fill:var(--ok)}
- svg text{font-family:ui-monospace,Menlo,monospace}
- #status{font-size:15px;padding:10px 14px;border-radius:8px;background:#16321f;
-   border:1px solid #2ea043;color:#7ee787;margin-top:12px}
- #status.pre{background:#332a12;border-color:var(--warn);color:#e3b341;animation:bl 1.4s infinite}
- #status.inc{background:#3d1214;border-color:var(--alert);color:#ff7b72;animation:bl 1s infinite}
- #feed{height:190px;overflow-y:auto;font-size:12px;line-height:1.6;margin-top:8px}
+ .farm{fill:#2EA04366} .farm-core{fill:var(--ok)}
+ svg text{font-family:var(--sans);font-weight:600}
+ #status{font-size:14px;font-weight:600;padding:11px 14px;border-radius:6px;background:#0D2417;
+   border:1px solid #1E5C38;border-left:4px solid var(--ok);color:#7EE787;margin-top:12px}
+ #status.pre{background:#241A05;border-color:#6B4E12;border-left-color:var(--warn);
+   color:#F0C36A;animation:bl 1.4s infinite}
+ #status.inc{background:#2E0D0B;border-color:#7A2B27;border-left-color:var(--alert);
+   color:#FF8A82;animation:bl 1s infinite;
+   background-image:repeating-linear-gradient(-45deg,transparent 0 12px,#FF544912 12px 24px)}
+ #feed{height:190px;overflow-y:auto;font-family:var(--mono);font-size:11.5px;line-height:1.65;margin-top:8px}
  #feed .WARN{color:var(--warn)} #feed .EMERG{color:var(--alert);font-weight:bold}
  #feed .OK{color:var(--ok)} #feed .INFO{color:var(--dim)}
  #incident{display:none}
- #incident.show{display:block;border-color:var(--alert)}
- #incident h2{margin:0 0 8px;color:var(--alert);font-size:16px;animation:bl 1.2s infinite}
- #incident table{width:100%;font-size:13px;border-collapse:collapse}
- #incident td{border-bottom:1px solid var(--line);padding:5px 6px}
- #incident td:first-child{color:var(--dim);width:150px}
- .tel{font-size:20px;font-weight:bold}
+ #incident.show{display:block;border-color:#7A2B27;border-top:3px solid var(--alert)}
+ #incident h2{margin:0 0 10px;color:var(--alert);font-size:14px;font-weight:800;
+   letter-spacing:.08em;animation:bl 1.2s infinite}
+ #incident table{width:100%;font-size:12.5px;border-collapse:collapse}
+ #incident td{border-bottom:1px solid var(--line);padding:6px}
+ #incident td:first-child{color:var(--dim);width:150px;font-size:11px;font-weight:700;
+   letter-spacing:.05em;text-transform:uppercase}
+ .tel{font-family:var(--mono);font-size:19px;font-weight:700;font-variant-numeric:tabular-nums}
  .tel.bad{color:var(--alert)}
- #overlay{display:none;position:fixed;inset:0;z-index:50;background:#1b0507ee;
+ #overlay{display:none;position:fixed;inset:0;z-index:50;background:#180507F2;
    text-align:center;padding-top:9vh}
  #overlay.show{display:block}
  #overlay .ringbox{display:inline-block;position:relative;width:150px;height:150px}
@@ -1033,37 +1165,54 @@ FIRE_PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
  #overlay .ringbox div:nth-child(3){animation-delay:1s}
  @keyframes opulse{0%{transform:scale(.55);opacity:1}100%{transform:scale(1.5);opacity:0}}
  #overlay .phone{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
-   font-size:64px;animation:shake .6s infinite}
- @keyframes shake{0%,100%{transform:rotate(0)}25%{transform:rotate(-12deg)}75%{transform:rotate(12deg)}}
- #overlay h2{font-size:30px;color:#fff;margin:26px 0 6px;animation:bl 1s infinite}
- #overlay h3{font-size:20px;color:#ffb3ad;margin:6px 0}
- #overlay .why{font-size:16px;color:#ffdfdc;margin:14px auto;max-width:640px;line-height:1.5}
- #answer{background:var(--ok);color:#04120a;border:none;border-radius:40px;
-   font-size:22px;font-weight:bold;padding:16px 54px;cursor:pointer;margin-top:18px;
-   font-family:inherit;box-shadow:0 0 40px #3fb95088}
- #answer:hover{transform:scale(1.05)}
- #duty{position:fixed;inset:0;z-index:60;background:#07090df2;display:flex;
-   align-items:center;justify-content:center;flex-direction:column;gap:18px}
- #duty button{background:var(--card);color:var(--tx);border:2px solid var(--acc);
-   border-radius:10px;font-size:20px;padding:18px 44px;cursor:pointer;font-family:inherit}
- #duty button:hover{background:#1c2530}
+   font-family:var(--sans);font-size:44px;font-weight:800;letter-spacing:.06em;color:#fff;
+   animation:callpulse 1.1s infinite}
+ @keyframes callpulse{0%,100%{transform:scale(1)}50%{transform:scale(1.09)}}
+ #overlay h2{font-size:28px;font-weight:800;letter-spacing:.04em;color:#fff;
+   margin:26px 0 6px;animation:bl 1s infinite}
+ #overlay h3{font-size:18px;font-weight:600;color:#FFB3AD;margin:6px 0}
+ #overlay .why{font-size:15.5px;color:#FFDFDC;margin:14px auto;max-width:640px;line-height:1.55}
+ #answer{background:var(--ok);color:#04120A;border:none;border-radius:8px;
+   font-family:var(--sans);font-size:19px;font-weight:800;letter-spacing:.08em;
+   padding:16px 54px;cursor:pointer;margin-top:18px;box-shadow:0 0 40px #35C46F66}
+ #answer:hover{transform:scale(1.04)}
+ #duty{position:fixed;inset:0;z-index:60;background:#080B10F5;display:flex;
+   align-items:center;justify-content:center;flex-direction:column;gap:16px}
+ #duty h1{font-size:19px;font-weight:800;letter-spacing:.09em;margin:0}
+ .roundel{width:88px;height:88px;border:3px solid var(--red);border-radius:50%;
+   display:flex;align-items:center;justify-content:center;
+   font-size:30px;font-weight:800;letter-spacing:.04em;color:#FF8A82}
+ #duty button{background:var(--card);color:var(--tx);border:1px solid var(--edge);
+   border-radius:8px;font-family:var(--sans);font-size:16px;font-weight:700;
+   letter-spacing:.04em;padding:16px 40px;cursor:pointer}
+ #duty button:hover{background:#1C2530;border-color:var(--acc)}
  .ok{color:var(--ok)}
 </style></head><body>
 
 <div id="duty">
- <div style="font-size:46px">🚒</div>
+ <div class="roundel">112</div>
  <h1>ISU BANAT — DISPECERAT 112 · STAȚIA LUGOJ</h1>
  <div class="dim">demo screen — receives BioGuard auto-dispatch calls</div>
  <button onclick="goOnDuty()">GO ON DUTY — enable audio alerts</button>
 </div>
 
-<h1>🚒 ISU BANAT — DISPECERAT 112 <span class="dim">· Stația de Pompieri Lugoj</span>
- <span id="uplink" class="pill off">BioGuard uplink: …</span>
- <span id="clock">--:--:--</span></h1>
+<header id="topbar">
+ <div class="brand"><span class="brand-tick"></span>
+  <div>
+   <div class="brand-name">ISU BANAT — DISPECERAT 112</div>
+   <div class="brand-sub">Stația de Pompieri Lugoj · BioGuard auto-dispatch uplink</div>
+  </div>
+ </div>
+ <div class="topbar-right">
+  <span class="pill sim">CONCEPT · SIMULATED CONSOLE — not an ISU system</span>
+  <span id="uplink" class="pill off">BioGuard uplink: …</span>
+  <span id="clock">--:--:--</span>
+ </div>
+</header>
 
 <div class="row">
  <div class="card" style="flex:3;min-width:420px">
-  <div class="dim">BIOGUARD FLEET — 40 monitored farms · România <span style="float:right">● <span class="ok">nominal</span> · ● <span style="color:var(--warn)">pre-alert</span> · ● <span style="color:var(--alert)">incident</span></span></div>
+  <div class="dim">BIOGUARD FLEET — 40 nodes · illustrative scale-out <span style="float:right">● <span class="ok">nominal</span> · ● <span style="color:var(--warn)">pre-alert</span> · ● <span style="color:var(--alert)">incident</span></span></div>
   <svg id="map" viewBox="0 0 672 480" style="width:100%;margin-top:8px">
    <polygon points="189,40 210,30 266,43 329,68 392,45 427,18 451,13 476,40 493,80 553,150 563,200 553,250 598,305 661,305 665,325 623,360 591,405 588,465 539,440 469,435 385,470 301,465 217,455 185,435 175,380 136,392 98,365 80,320 42,265 3,230 63,180 91,140 126,90 168,60"
      fill="#131c26" stroke="#2c3a4d" stroke-width="2"/>
@@ -1074,7 +1223,8 @@ FIRE_PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
       <animate attributeName="opacity" values=".9;0" dur="1.4s" repeatCount="indefinite"/></circle>
     <line x1="95" y1="255" x2="119" y2="271" stroke="#58a6ff" stroke-width="1.6" stroke-dasharray="5 4"/>
     <circle cx="119" cy="271" r="5" fill="#58a6ff"/>
-    <text x="126" y="276" fill="#58a6ff" font-size="11">Stația Lugoj · 32 km · ETA ~26 min</text>
+    <text x="126" y="272" fill="#58a6ff" font-size="9">Stația Lugoj</text>
+    <text x="126" y="284" fill="#58a6ff" font-size="9">~14 km · ETA ~18 min</text>
     <text x="95" y="242" fill="#ff7b72" font-size="12" font-weight="bold" text-anchor="middle">FERMA STRĂJER</text>
    </g>
    <circle id="incdot" cx="95" cy="255" r="6" class="farm-core"/>
@@ -1087,7 +1237,7 @@ FIRE_PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
    <h2 id="inc-title">⬤ ACTIVE INCIDENT</h2>
    <table>
     <tr><td>Farm</td><td><b>Ferma Străjer</b> — BioGuard node FS-017</td></tr>
-    <tr><td>Location</td><td>sat Știuca, jud. Timiș · 45.85°N 21.55°E</td></tr>
+    <tr><td>Location</td><td>sat Știuca, jud. Timiș · 45.57°N 21.98°E</td></tr>
     <tr><td>Contact</td><td>Ion Popescu („Nea Ion") · +40 7xx xxx xxx</td></tr>
     <tr><td>Nature</td><td id="inc-nature">—</td></tr>
     <tr><td>Dispatched</td><td id="inc-crew">1× autospecială stingere + SMURD — Stația Lugoj</td></tr>
@@ -1105,11 +1255,11 @@ FIRE_PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
 </div>
 
 <div id="overlay">
- <div class="ringbox"><div></div><div></div><div></div><div class="phone">☎</div></div>
+ <div class="ringbox"><div></div><div></div><div></div><div class="phone">112</div></div>
  <h2>INCOMING AUTOMATED EMERGENCY CALL</h2>
  <h3>BioGuard Auto-Dispatch · node FS-017 — Ferma Străjer, jud. Timiș</h3>
  <div class="why" id="ov-why">—</div>
- <div class="dim">machine-generated call · sensor-verified · GPS attached</div><br>
+ <div class="dim">machine-generated call · two independent channels agree · GPS attached</div><br>
  <button id="answer" onclick="answerCall()">ANSWER</button>
 </div>
 
@@ -1143,7 +1293,7 @@ function goOnDuty(){try{AC=new (window.AudioContext||window.webkitAudioContext)(
  el('duty').style.display='none';log('INFO','on duty — BioGuard uplink monitoring 40 nodes');}
 
 // ── incident state machine ───────────────────────────────────────────────
-let phase='idle';          // idle | prealert | ringing | active | contained
+let phase='idle';          // idle | prealert | held | ringing | active | contained
 function log(sev,msg){const d=document.createElement('div');d.className=sev;
  d.textContent=`${new Date().toLocaleTimeString('ro-RO')}  ${msg}`;
  const f=el('feed');if(f.firstChild&&f.firstChild.className==='dim')f.innerHTML='';
@@ -1175,12 +1325,13 @@ function answerCall(){stopRing();el('overlay').className='';phase='active';
  el('incident').className='card show';
  el('incgroup').style.display='';
  el('status').className='inc';
- el('status').textContent='⬤ ACTIVE INCIDENT — Ferma Străjer · crew Lugoj dispatched · ETA ~26 min';
+ el('status').textContent='⬤ ACTIVE INCIDENT — Ferma Străjer · crew Lugoj dispatched · ETA ~18 min';
  zoomTo(0,155,280,200,900);
  log('EMERG','call answered — dispatching 1× autospecială + SMURD from Stația Lugoj');
  log('INFO','GPS + live telemetry link opened to responding crew');}
 
-function contain(){if(phase!=='active'&&phase!=='prealert'&&phase!=='ringing')return;
+function contain(){pendingFlame=null;
+ if(phase!=='active'&&phase!=='prealert'&&phase!=='ringing'&&phase!=='held')return;
  stopRing();el('overlay').className='';
  phase='contained';setDot('var(--ok)',6);
  el('incgroup').style.display='none';
@@ -1194,16 +1345,50 @@ function contain(){if(phase!=='active'&&phase!=='prealert'&&phase!=='ringing')re
    el('inc-title').style.animation='';el('status').textContent='NO ACTIVE INCIDENTS — 40 farms reporting normal';}},12000);}
 
 // ── SSE: same stream the main dashboard reads ────────────────────────────
+// ── corroboration gate ───────────────────────────────────────────────────
+// We never roll a crew on a single binary pin. Our own tier-2 analyst flags a
+// flame asserted with no thermal signature as "sensor fault or spoofed input";
+// dispatching on that anyway would have our two screens contradicting each
+// other live. So a FLAME_DETECTED is HELD until a second, physically
+// independent channel agrees -- hall temperature rising over the session
+// baseline, or CH4 critical in the same building. A false truck roll is a real
+// cost to a real station, and it is how a farm gets switched off.
+let ambT1=null,lastT1=null,flameOn=false,gasCrit=false,pendingFlame=null;
+const CORRO_RISE=5;   // °C over pre-event ambient before we believe the flame pin
+function corroboration(){
+ if(gasCrit)return 'CH4 critical in the same building';
+ if(ambT1!==null&&lastT1!==null&&lastT1-ambT1>=CORRO_RISE)
+   return 'hall temperature +'+Math.round(lastT1-ambT1)+'° over ambient';
+ return null;}
+function tryDispatch(){if(!pendingFlame)return;
+ const why=corroboration();if(!why)return;
+ const p=pendingFlame;pendingFlame=null;
+ log('OK','corroborated — '+why);
+ dispatch(p.n,p.w+'<br><span class="dim">corroboration: '+why+'</span>');}
+function holdFlame(n,w){if(phase==='ringing'||phase==='active'||pendingFlame)return;
+ pendingFlame={n:n,w:w};phase='held';setDot('var(--warn)',8);
+ el('status').className='pre';
+ el('status').innerHTML='◐ FLAME ASSERTED — HELD FOR CORROBORATION<br><span class="dim">single-sensor assertion from FS-017 · no crew dispatched until a second independent channel agrees</span>';
+ log('WARN','flame asserted by FS-017 — HELD: single sensor, awaiting corroboration');
+ tryDispatch();}
+
 function onTel(t){const g=t.gas?t.gas.v:null,fl=t.flame?t.flame.v:null,t1=t.t1?t.t1.v:null;
  if(g!==null){el('tel-gas').textContent=Math.round(g)+(g>=700?'  — EXPLOSIVE':'');
-   el('tel-gas').className='tel'+(g>=700?' bad':'');}
+   el('tel-gas').className='tel'+(g>=700?' bad':'');
+   if(g>=700)gasCrit=true;else if(g<400)gasCrit=false;}
  if(fl!==null){el('tel-flame').textContent=fl>0?'DETECTED':'clear';
-   el('tel-flame').className='tel'+(fl>0?' bad':'');}
- if(t1!==null)el('tel-t1').textContent=Math.round(t1)+'°C';}
+   el('tel-flame').className='tel'+(fl>0?' bad':'');flameOn=fl>0;}
+ if(t1!==null){el('tel-t1').textContent=Math.round(t1)+'°C';lastT1=t1;
+   // ambient only tracks while nothing is burning, so a fire can never drag
+   // its own baseline up behind it
+   if(!flameOn)ambT1=(ambT1===null)?t1:ambT1*0.9+t1*0.1;}
+ tryDispatch();}
 function onEvent(e){const p=e.raw.split('|');
  if(p[0]==='AI'&&p[1]==='PREDICT'&&(e.sev==='WARN'||e.sev==='ALERT'))preAlert(p[4]||'');
+ if(p[0]==='AI'&&p[1]==='PLAUS'&&(p[3]||'').indexOf('FLAME')>=0&&pendingFlame)
+   log('WARN','tier-2 analyst agrees: '+(p[4]||'flame implausible')+' — dispatch stays held');
  if(p[0]==='EVT'&&e.sev==='EMERG'){
-  if(p[3]==='FLAME_DETECTED')dispatch('FIRE — flame sensor triggered (feed & water store)',
+  if(p[3]==='FLAME_DETECTED')holdFlame('FIRE — flame confirmed (feed & water store)',
     'Flame detected in the feed store.<br>CH4 + hay environment — <b>high fire spread risk</b>.<br>Sprinkler + ventilation already actuated by the on-site reflex layer.');
   else if(p[3]==='GAS_CRITICAL')dispatch('EXPLOSIVE ATMOSPHERE — CH4 critical (manure pit)',
     'Methane above the critical threshold in the manure pit.<br><b>Explosion risk — livestock and one family on site.</b><br>Power to the pit cut and extraction running (automatic).');}
@@ -1223,7 +1408,8 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", help="serial port to auto-connect at startup (optional; UI can pick)")
     ap.add_argument("--baud", type=int, default=115200)
-    ap.add_argument("--fake", action="store_true", help="generated data, no Arduino")
+    ap.add_argument("--fake", action="store_true", help="generated data, no hardware")
+    ap.add_argument("--pi", help="Raspberry Pi node host/IP — adds socket://<pi>:7777 to the port picker")
     ap.add_argument("--baseline", type=float, default=45.0,
                     help="seconds of normal operation the analyst learns from (venue: 600)")
     ap.add_argument("--host", default="0.0.0.0")
@@ -1231,6 +1417,8 @@ if __name__ == "__main__":
                     help="dashboard port (use another one to run a second bench alongside)")
     args = ap.parse_args()
     analyst.baseline_secs = args.baseline
+    if args.pi:
+        pi_host = args.pi
     if args.fake:
         fake_on = True
         threading.Thread(target=fake_loop, daemon=True).start()

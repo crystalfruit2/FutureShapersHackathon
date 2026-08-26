@@ -10,7 +10,7 @@ config_version=5
 
 [application]
 
-config/name="Bio Guard — Attract Loop"
+config/name="BioGuard — Attract Loop"
 run/main_scene="res://Main.tscn"
 config/features=PackedStringArray("4.7", "GL Compatibility")
 

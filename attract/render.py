@@ -1,4 +1,4 @@
-"""Bio Guard — attract loop renderer.  320x180 internal, nearest-upscaled.
+"""BioGuard — attract loop renderer.  320x180 internal, nearest-upscaled.
 Renders frames -> ffmpeg -> loop.mp4.  No browser, no engine, no assets."""
 from PIL import Image, ImageDraw
 import math, random, os, sys
@@ -287,6 +287,27 @@ FONT = {
  '/':["00001","00010","00010","00100","01000","01000","10000"],
  ' ':["00","00","00","00","00","00","00"],
 }
+# Romanian diacritics. text() force-uppercases, so only the caps forms are
+# needed. The comma-below letters run two rows past the baseline -- that is what
+# a comma below is -- while the breve/circumflex letters keep the 7-row box by
+# compressing the letter into rows 2-6, so every baseline still lines up.
+FONT["Ă"] = ["01110","00000","01110","10001","11111","10001","10001"]   # A-breve
+FONT["Â"] = ["00100","00000","01110","10001","11111","10001","10001"]   # A-circumflex
+FONT["Î"] = ["010","000","111","010","010","010","111"]                 # I-circumflex
+FONT["Ș"] = FONT["S"] + ["00000","00100"]                               # S-comma
+FONT["Ț"] = FONT["T"] + ["00000","00100"]                               # T-comma
+# punctuation the cold-open cards need: the euro figure, the separator dot,
+# a comma that hangs below the baseline, an em dash and the delta arrow.
+FONT["€"] = ["00111","01000","11110","01000","11110","01000","00111"]
+FONT["·"] = ["0","0","0","1","0","0","0"]
+FONT[","] = ["00","00","00","00","00","01","01","10"]
+FONT["\u2014"] = ["00000","00000","00000","11111","00000","00000","00000"]
+FONT["\u2192"] = ["00000","00100","00010","11111","00010","00100","00000"]
+
+# the legacy cedilla codepoints are still all over Romanian source text
+FONT["Ş"] = FONT["Ș"]
+FONT["Ţ"] = FONT["Ț"]
+
 def text(d, s, x, y, col, scale=1, sp=1):
     cx=x
     for ch in s.upper():
