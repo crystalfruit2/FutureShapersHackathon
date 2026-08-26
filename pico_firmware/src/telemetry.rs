@@ -11,6 +11,7 @@ pub struct Telemetry {
     pub gas: Option<u16>,
     pub temperature: Option<f32>,
     pub humidity: Option<f32>,
+    pub water_level: Option<u16>,
 }
 
 impl Telemetry {
@@ -19,6 +20,7 @@ impl Telemetry {
             gas: None,
             temperature: None,
             humidity: None,
+            water_level: None,
         }
     }
 }

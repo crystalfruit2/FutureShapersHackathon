@@ -52,8 +52,9 @@ async fn main(spawner: Spawner) {
 
     // Setup gas sensor
     let adc = Adc::new(p.ADC, Irqs, AdcConfig::default());
-    let adc_pin = Channel::new_pin(p.PIN_26, Pull::Down);
-    spawner.spawn(gas::read_gas(adc, adc_pin).unwrap());
+    let gas_pin = Channel::new_pin(p.PIN_26, Pull::None);
+    let water_pin = Channel::new_pin(p.PIN_27, Pull::None);
+    spawner.spawn(gas::read_gas_water(adc, gas_pin, water_pin).unwrap());
 
     // Setup DHT11
     let dht_flex_pin = Flex::new(p.PIN_15);
