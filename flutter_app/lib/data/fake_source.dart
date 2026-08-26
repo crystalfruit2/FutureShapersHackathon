@@ -153,7 +153,9 @@ class FakeDataSource implements StrajerDataSource {
   int _ctr = 0;
 
   @override
-  Future<void> command(String action) async {
+  Future<void> command(String action, {String role = 'admin', String pin = ''}) async {
+    // offline demo generator: no auth surface here — RBAC/PIN/lockdown live
+    // on the bridge, which Live mode exercises for real
     _ctr++;
     switch (action) {
       case 'ARM': _exitEmergency(); _setMode(FarmMode.night);

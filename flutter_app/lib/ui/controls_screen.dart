@@ -21,6 +21,39 @@ class _ControlsScreenState extends State<ControlsScreen> {
         padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
         children: [
           Text('Controls', style: Theme.of(context).textTheme.headlineMedium),
+          const SectionLabel('Access'),
+          Panel(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              SegmentedButton<String>(
+                segments: const [
+                  ButtonSegment(value: 'admin', label: Text('Admin')),
+                  ButtonSegment(value: 'operator', label: Text('Operator')),
+                  ButtonSegment(value: 'viewer', label: Text('Viewer')),
+                ],
+                selected: {app.role},
+                showSelectedIcon: false,
+                onSelectionChanged: (s) => app.setRole(s.first),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                switch (app.role) {
+                  'admin' => 'Full control — protected commands are PIN-signed.',
+                  'operator' =>
+                    'Runs the farm day-to-day, but cannot switch safety gear off mid-incident and cannot push firmware.',
+                  _ =>
+                    'Read-only. Controls are disabled here AND the bridge rejects anything this role sends.',
+                },
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ]),
+          ),
+          AbsorbPointer(
+            absorbing: app.role == 'viewer',
+            child: Opacity(
+              opacity: app.role == 'viewer' ? 0.45 : 1.0,
+              child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
           const SectionLabel('Demo director'),
           Panel(
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -227,6 +260,9 @@ class _ControlsScreenState extends State<ControlsScreen> {
                   ),
               ],
             ]),
+          ),
+                  ]),
+            ),
           ),
           const SectionLabel('Simulation bench · demo only'),
           Panel(

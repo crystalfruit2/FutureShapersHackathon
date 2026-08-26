@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Ferma Strajer - supervisory bridge + FIRMWARE TEST BENCH (laptop side).
+BioGuard (Ferma Strajer) - supervisory bridge + FIRMWARE TEST BENCH (laptop side).
 
 Roles:
   1. Serial bridge: owns the USB link to the Arduino, rebroadcasts as SSE.
@@ -8,6 +8,9 @@ Roles:
   3. Firmware test bench (for Oleksandr): port picker, raw protocol console,
      conformance counters (unparsed lines flagged), scripted test sequences.
   4. Bridge for the Flutter app (same SSE + POST endpoints).
+  5. /fire - PITCH DEMO ONLY: fire-station dispatch screen (ISU Banat, Lugoj).
+     Read-only SSE consumer: pre-alert on AI forecasts, full incoming-call
+     dispatch on FLAME_DETECTED / GAS_CRITICAL. Open it in a second window.
 
 Run:
     python3 app.py --fake              # no hardware - UI dev / demo rehearsal
@@ -45,6 +48,38 @@ subscribers = []
 cmd_counter = int(time.time()) % 100000
 last_sent = {"counter":0, "action":""}
 lock = threading.Lock()
+
+# ── access control (bridge = the supervisory security layer) ─────────────
+# Enforced HERE, not in the UIs: a greyed-out button is cosmetics, a 403 with
+# a SEC event on the wire is a control. Applies to real firmware and fake.
+PIN_CODE = "1324"                    # mirrors the panel keypad code 1-3-2-4
+ROLE_RANK = {"viewer":0, "operator":1, "admin":2}
+security = {"pin_fails":0, "lockdown":False}
+
+def fw_sig(ver: str) -> int:
+    return crc8(SECRET, crc8(ver.encode()))
+
+def sec_event(line: str):
+    handle_line(f"SEC|{line}")
+
+def enter_lockdown(reason: str):
+    if security["lockdown"]: return
+    security["lockdown"] = True
+    if fake_on:
+        if fake["mode"] not in ("LOCKDOWN", "EMERGENCY"):
+            fake["premode"] = fake["mode"]
+        fake["mode"] = "LOCKDOWN"; fake["fan"] = 1; fake["spr"] = 0
+    sec_event(f"LOCKDOWN|{reason}")
+    handle_line("EVT|0|ctrl|LOCKDOWN|3|ALERT")
+    handle_line("STATE|LOCKDOWN")
+
+def clear_lockdown():
+    security["lockdown"] = False
+    security["pin_fails"] = 0
+    if fake_on and fake["mode"] == "LOCKDOWN":
+        fake["mode"] = fake.get("premode", "DAY")
+    sec_event("LOCKDOWN_CLEARED|ADMIN_PIN")
+    handle_line(f"STATE|{fake['mode'] if fake_on else state['mode']}")
 
 ser = None                # live pyserial handle
 ser_port = None
@@ -202,9 +237,17 @@ def script_nh3_drift():
     time.sleep(30)          # plateau: threshold silent, PREDICT lapses, DRIFT holds
     send_raw("SIM|nh3=8")
 
+def script_fw_signed():
+    ver = "1.4"
+    send_raw(f"FW|{ver}|{fw_sig(ver)}")
+
+def script_fw_unsigned():
+    send_raw("FW|6.6|13")            # attacker-built image: signature doesn't verify
+
 SCRIPTS = {"gas_ramp":script_gas_ramp, "replay":script_replay,
            "night_intruder":script_night_intruder, "flame":script_flame,
-           "slow_creep":script_slow_creep, "nh3_drift":script_nh3_drift}
+           "slow_creep":script_slow_creep, "nh3_drift":script_nh3_drift,
+           "fw_signed":script_fw_signed, "fw_unsigned":script_fw_unsigned}
 
 # ── fake-data generator ──────────────────────────────────────────────────
 fake = {"gas":120,"nh3":8,"flame":0,"t1":24,"t2":24,"hum":55,"water":72,"food":58,
@@ -214,6 +257,16 @@ fake = {"gas":120,"nh3":8,"flame":0,"t1":24,"t2":24,"hum":55,"water":72,"food":5
 def fake_rx(s: str):
     if s.startswith("SIM|"):
         k, v = s[4:].split("=");  fake[k] = float(v); fake["sim"].add(k)
+    elif s.startswith("FW|"):
+        # signed-update demo: device only flashes an image whose signature
+        # verifies against the shared secret (same primitive as the CMD MAC)
+        _, ver, sig = s.split("|")
+        if int(sig) == fw_sig(ver):
+            fake["fw"] = ver
+            handle_line(f"EVT|0|ctrl|FW_VERIFIED|v{ver}|INFO")
+        else:
+            handle_line("SEC|FW_REJECTED|BAD_SIGNATURE")
+        return
     elif s.startswith("CMD|"):
         _, ctr, mac, action = s.split("|")
         ctr = int(ctr)
@@ -222,6 +275,10 @@ def fake_rx(s: str):
         if int(mac) != mac_for(ctr, action):
             handle_line("SEC|CMD_REJECTED|BAD_MAC"); return
         fake["ctr"] = ctr
+        if fake["mode"] == "LOCKDOWN" and action != "FAN_ON":
+            # tamper lockdown: device itself refuses non-essential commands,
+            # even ones with a valid MAC (raw-console bypass covered too)
+            handle_line(f"SEC|CMD_REJECT|LOCKDOWN|{action}"); return
         handle_line(f"ACK|{ctr}")
         if action == "ARM": fake["mode"] = "NIGHT"
         elif action == "DISARM": fake["mode"] = "DAY"
@@ -599,6 +656,9 @@ def _run_script(name):
 def script():
     name = request.json["name"]
     if name not in SCRIPTS: return {"ok": False}, 404
+    if name.startswith("fw_") and request.json.get("role", "admin") != "admin":
+        sec_event(f"CMD_REJECTED|ADMIN_ONLY|FW_UPDATE")
+        return {"ok": False, "err": "firmware updates need admin"}, 403
     if script_busy["name"]:
         events.append({"raw":f"DASH|'{script_busy['name']}' still running — wait for it to finish",
                        "t":now_t(), "sev":"INFO"})
@@ -613,7 +673,40 @@ def script():
 @app.route("/cmd", methods=["POST"])
 def cmd():
     global cmd_counter
-    action = request.json["action"]
+    d = request.json
+    action = d["action"]
+    role = d.get("role", "admin")        # legacy clients keep full access; the UIs always send a role
+    pin = str(d.get("pin", "") or "")
+    rank = ROLE_RANK.get(role, 0)
+    critical = state["mode"] in ("EMERGENCY", "LOCKDOWN")
+
+    if security["lockdown"] and action != "UNLOCK":
+        sec_event(f"CMD_REJECTED|LOCKDOWN_ACTIVE|{action}")
+        return {"ok": False, "err": "lockdown: only admin UNLOCK accepted"}, 403
+    if rank < 1:
+        sec_event(f"CMD_REJECTED|ROLE_VIEWER|{action}")
+        return {"ok": False, "err": "viewer role cannot send commands"}, 403
+    if action == "UNLOCK" and rank < 2:
+        sec_event(f"CMD_REJECTED|ADMIN_ONLY|{action}")
+        return {"ok": False, "err": "UNLOCK needs admin"}, 403
+    if action.endswith("_OFF") and critical and rank < 2:
+        # an operator may never de-energise safety actuators mid-incident
+        sec_event(f"CMD_REJECTED|OFF_IN_{state['mode']}|{action}")
+        return {"ok": False, "err": f"{action} needs admin while {state['mode']}"}, 403
+
+    needs_pin = action in ("DISARM", "UNLOCK") or (action.endswith("_OFF") and critical)
+    if needs_pin:
+        if pin != PIN_CODE:
+            security["pin_fails"] += 1
+            sec_event(f"PIN_FAIL|ATTEMPT_{security['pin_fails']}|{action}")
+            if security["pin_fails"] >= 3:
+                enter_lockdown("REPEATED_PIN_FAILURES")
+            return {"ok": False, "err": "wrong PIN"}, 403
+        security["pin_fails"] = 0
+
+    if action == "UNLOCK":
+        clear_lockdown()
+        return {"ok": True}
     with lock:
         cmd_counter += 1
         last_sent.update(counter=cmd_counter, action=action)
@@ -650,6 +743,10 @@ def sim():
 @app.route("/")
 def index():
     return PAGE
+
+@app.route("/fire")
+def fire():
+    return FIRE_PAGE
 
 # Bio Guard web app (flutter build web), served same-origin at /app/
 import os
@@ -713,9 +810,10 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
  #banner.AIB{display:block;background:var(--acc);color:#04121f}
 </style></head><body>
 <div id="banner" onclick="this.className=''"></div>
-<h1>BIO GUARD <span class="dim">— bridge & firmware test bench</span>
+<h1>BIOGUARD <span class="dim">— bridge & firmware test bench</span>
  <span id="serialpill" class="pill off">serial: none</span>
- <span class="dim" id="stats"></span></h1>
+ <span class="dim" id="stats"></span>
+ <a href="/fire" target="_blank" style="float:right;color:var(--alert);font-size:12px;text-decoration:none;border:1px solid var(--alert);border-radius:20px;padding:3px 10px">🚒 fire-station screen</a></h1>
 
 <div class="row">
  <div class="card" style="flex:2">
@@ -734,7 +832,9 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
    <button onclick="script('flame')">FLAME 5s</button><br>
    <button class="acc" onclick="script('slow_creep')">AI · SLOW GAS CREEP (predicted ~60s early)</button>
    <button class="acc" onclick="script('nh3_drift')">AI · NH3 DRIFT (never crosses the limit)</button>
-   <button onclick="cmd('DUMPLOG')">AUDIT DUMP</button>
+   <button onclick="cmd('DUMPLOG')">AUDIT DUMP</button><br>
+   <button class="acc" onclick="script('fw_signed')">FW UPDATE v1.4 (signed)</button>
+   <button class="red" onclick="script('fw_unsigned')">FW UPDATE (unsigned — attack)</button>
   </div>
   <div id="console"></div>
   <div style="margin-top:8px;display:flex;gap:6px">
@@ -744,11 +844,15 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
   </div>
  </div>
  <div class="card" style="flex:0 0 260px"><div class="dim">MODE</div><div id="mode" class="DAY">—</div>
-  <div style="margin-top:10px">
+  <div style="margin:8px 0 2px" class="dim">signed in as
+   <select id="role"><option>admin</option><option>operator</option><option>viewer</option></select>
+   <input type="text" id="pin" placeholder="PIN" style="width:58px" maxlength="4"></div>
+  <div style="margin-top:6px">
    <button onclick="cmd('ARM')">ARM night</button><button onclick="cmd('DISARM')">DISARM</button><br>
    <button onclick="cmd('FAN_ON')">FAN ON</button><button onclick="cmd('FAN_OFF')">FAN OFF</button>
    <button onclick="cmd('VENT')">VENT</button><br>
    <button class="red" onclick="fetch('/attack',{method:'POST',headers:H})">REPLAY ATTACK</button>
+   <button class="red" onclick="cmd('UNLOCK')">UNLOCK</button>
   </div>
   <div class="dim" style="margin-top:12px">ENERGY</div>
   <div id="energy">—</div><div class="dim">saved vs always-on</div>
@@ -792,10 +896,11 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
 </div>
 <script>
 const H={'Content-Type':'application/json'};
-const cmd=a=>fetch('/cmd',{method:'POST',headers:H,body:JSON.stringify({action:a})});
-const sim=(n,v)=>fetch('/sim',{method:'POST',headers:H,body:JSON.stringify({name:n,value:v})});
-const script=n=>fetch('/script',{method:'POST',headers:H,body:JSON.stringify({name:n})});
 const el=id=>document.getElementById(id);
+const cmd=a=>fetch('/cmd',{method:'POST',headers:H,
+ body:JSON.stringify({action:a,role:el('role').value,pin:el('pin').value})});
+const sim=(n,v)=>fetch('/sim',{method:'POST',headers:H,body:JSON.stringify({name:n,value:v})});
+const script=n=>fetch('/script',{method:'POST',headers:H,body:JSON.stringify({name:n,role:el('role').value})});
 function sendRawLine(){const i=el('rawline');if(!i.value.trim())return;
  fetch('/raw',{method:'POST',headers:H,body:JSON.stringify({line:i.value})});i.value='';}
 async function loadPorts(){const r=await(await fetch('/ports')).json();
@@ -876,6 +981,242 @@ es.onmessage=ev=>{const m=JSON.parse(ev.data);
    onCounters(m.counters||{rx:0,tx:0,unparsed:0});onSerial(m.serial||{});
    if(m.ai)onAi(m.ai);}};
 loadPorts();
+</script></body></html>"""
+
+# ── /fire — fire-station dispatch screen (PITCH DEMO ONLY) ───────────────
+# Read-only consumer of the same SSE stream. No bridge/firmware logic here:
+# if this page is closed nothing changes. Stylized Romania map, 40 BioGuard
+# nodes; the live node is Ferma Strajer (Nea Ion, jud. Timis), responding
+# station is Lugoj — the jury's own Honeywell town.
+FIRE_PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ISU Banat — Dispecerat 112</title>
+<style>
+ :root{--bg:#07090d;--card:#10141b;--line:#242c38;--tx:#e6edf3;--dim:#7d8896;
+       --ok:#3fb950;--warn:#d29922;--alert:#f85149;--acc:#58a6ff;--red:#c62828}
+ *{box-sizing:border-box;font-family:ui-monospace,Menlo,monospace}
+ body{margin:0;background:var(--bg);color:var(--tx);padding:14px;overflow-x:hidden}
+ h1{font-size:19px;margin:0;letter-spacing:1px}
+ .dim{color:var(--dim);font-size:12px}
+ .row{display:flex;gap:14px;flex-wrap:wrap;margin-top:14px}
+ .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}
+ .pill{display:inline-block;border:1px solid var(--line);border-radius:20px;padding:3px 12px;font-size:12px;margin-left:8px}
+ .pill.on{border-color:var(--ok);color:var(--ok)}
+ .pill.off{border-color:var(--warn);color:var(--warn)}
+ #clock{float:right;font-size:26px;font-weight:bold;color:var(--acc)}
+ @keyframes bl{50%{opacity:.35}}
+ @keyframes ringpulse{0%{r:8;opacity:.9}100%{r:34;opacity:0}}
+ .farm{fill:#2ea04366} .farm-core{fill:var(--ok)}
+ svg text{font-family:ui-monospace,Menlo,monospace}
+ #status{font-size:15px;padding:10px 14px;border-radius:8px;background:#16321f;
+   border:1px solid #2ea043;color:#7ee787;margin-top:12px}
+ #status.pre{background:#332a12;border-color:var(--warn);color:#e3b341;animation:bl 1.4s infinite}
+ #status.inc{background:#3d1214;border-color:var(--alert);color:#ff7b72;animation:bl 1s infinite}
+ #feed{height:190px;overflow-y:auto;font-size:12px;line-height:1.6;margin-top:8px}
+ #feed .WARN{color:var(--warn)} #feed .EMERG{color:var(--alert);font-weight:bold}
+ #feed .OK{color:var(--ok)} #feed .INFO{color:var(--dim)}
+ #incident{display:none}
+ #incident.show{display:block;border-color:var(--alert)}
+ #incident h2{margin:0 0 8px;color:var(--alert);font-size:16px;animation:bl 1.2s infinite}
+ #incident table{width:100%;font-size:13px;border-collapse:collapse}
+ #incident td{border-bottom:1px solid var(--line);padding:5px 6px}
+ #incident td:first-child{color:var(--dim);width:150px}
+ .tel{font-size:20px;font-weight:bold}
+ .tel.bad{color:var(--alert)}
+ #overlay{display:none;position:fixed;inset:0;z-index:50;background:#1b0507ee;
+   text-align:center;padding-top:9vh}
+ #overlay.show{display:block}
+ #overlay .ringbox{display:inline-block;position:relative;width:150px;height:150px}
+ #overlay .ringbox div{position:absolute;inset:0;border:3px solid var(--alert);
+   border-radius:50%;animation:opulse 1.6s infinite ease-out}
+ #overlay .ringbox div:nth-child(2){animation-delay:.5s}
+ #overlay .ringbox div:nth-child(3){animation-delay:1s}
+ @keyframes opulse{0%{transform:scale(.55);opacity:1}100%{transform:scale(1.5);opacity:0}}
+ #overlay .phone{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+   font-size:64px;animation:shake .6s infinite}
+ @keyframes shake{0%,100%{transform:rotate(0)}25%{transform:rotate(-12deg)}75%{transform:rotate(12deg)}}
+ #overlay h2{font-size:30px;color:#fff;margin:26px 0 6px;animation:bl 1s infinite}
+ #overlay h3{font-size:20px;color:#ffb3ad;margin:6px 0}
+ #overlay .why{font-size:16px;color:#ffdfdc;margin:14px auto;max-width:640px;line-height:1.5}
+ #answer{background:var(--ok);color:#04120a;border:none;border-radius:40px;
+   font-size:22px;font-weight:bold;padding:16px 54px;cursor:pointer;margin-top:18px;
+   font-family:inherit;box-shadow:0 0 40px #3fb95088}
+ #answer:hover{transform:scale(1.05)}
+ #duty{position:fixed;inset:0;z-index:60;background:#07090df2;display:flex;
+   align-items:center;justify-content:center;flex-direction:column;gap:18px}
+ #duty button{background:var(--card);color:var(--tx);border:2px solid var(--acc);
+   border-radius:10px;font-size:20px;padding:18px 44px;cursor:pointer;font-family:inherit}
+ #duty button:hover{background:#1c2530}
+ .ok{color:var(--ok)}
+</style></head><body>
+
+<div id="duty">
+ <div style="font-size:46px">🚒</div>
+ <h1>ISU BANAT — DISPECERAT 112 · STAȚIA LUGOJ</h1>
+ <div class="dim">demo screen — receives BioGuard auto-dispatch calls</div>
+ <button onclick="goOnDuty()">GO ON DUTY — enable audio alerts</button>
+</div>
+
+<h1>🚒 ISU BANAT — DISPECERAT 112 <span class="dim">· Stația de Pompieri Lugoj</span>
+ <span id="uplink" class="pill off">BioGuard uplink: …</span>
+ <span id="clock">--:--:--</span></h1>
+
+<div class="row">
+ <div class="card" style="flex:3;min-width:420px">
+  <div class="dim">BIOGUARD FLEET — 40 monitored farms · România <span style="float:right">● <span class="ok">nominal</span> · ● <span style="color:var(--warn)">pre-alert</span> · ● <span style="color:var(--alert)">incident</span></span></div>
+  <svg id="map" viewBox="0 0 672 480" style="width:100%;margin-top:8px">
+   <polygon points="189,40 210,30 266,43 329,68 392,45 427,18 451,13 476,40 493,80 553,150 563,200 553,250 598,305 661,305 665,325 623,360 591,405 588,465 539,440 469,435 385,470 301,465 217,455 185,435 175,380 136,392 98,365 80,320 42,265 3,230 63,180 91,140 126,90 168,60"
+     fill="#131c26" stroke="#2c3a4d" stroke-width="2"/>
+   <g id="fleet"></g>
+   <g id="incgroup" style="display:none">
+    <circle id="ring1" cx="95" cy="255" fill="none" stroke="#f85149" stroke-width="2">
+      <animate attributeName="r" values="8;36" dur="1.4s" repeatCount="indefinite"/>
+      <animate attributeName="opacity" values=".9;0" dur="1.4s" repeatCount="indefinite"/></circle>
+    <line x1="95" y1="255" x2="119" y2="271" stroke="#58a6ff" stroke-width="1.6" stroke-dasharray="5 4"/>
+    <circle cx="119" cy="271" r="5" fill="#58a6ff"/>
+    <text x="126" y="276" fill="#58a6ff" font-size="11">Stația Lugoj · 32 km · ETA ~26 min</text>
+    <text x="95" y="242" fill="#ff7b72" font-size="12" font-weight="bold" text-anchor="middle">FERMA STRĂJER</text>
+   </g>
+   <circle id="incdot" cx="95" cy="255" r="6" class="farm-core"/>
+  </svg>
+  <div id="status">NO ACTIVE INCIDENTS — 40 farms reporting normal</div>
+ </div>
+
+ <div style="flex:2;min-width:340px;display:flex;flex-direction:column;gap:14px">
+  <div class="card" id="incident">
+   <h2 id="inc-title">⬤ ACTIVE INCIDENT</h2>
+   <table>
+    <tr><td>Farm</td><td><b>Ferma Străjer</b> — BioGuard node FS-017</td></tr>
+    <tr><td>Location</td><td>sat Știuca, jud. Timiș · 45.85°N 21.55°E</td></tr>
+    <tr><td>Contact</td><td>Ion Popescu („Nea Ion") · +40 7xx xxx xxx</td></tr>
+    <tr><td>Nature</td><td id="inc-nature">—</td></tr>
+    <tr><td>Dispatched</td><td id="inc-crew">1× autospecială stingere + SMURD — Stația Lugoj</td></tr>
+    <tr><td>Live CH4 (pit)</td><td class="tel" id="tel-gas">—</td></tr>
+    <tr><td>Live flame</td><td class="tel" id="tel-flame">—</td></tr>
+    <tr><td>Hall temp</td><td class="tel" id="tel-t1">—</td></tr>
+   </table>
+   <div class="dim" style="margin-top:8px">⚠ manure-pit gas: instruct crew SCBA before entry — rescuers are >¼ of victims</div>
+  </div>
+  <div class="card" style="flex:1">
+   <div class="dim">DISPATCH LOG</div>
+   <div id="feed"><span class="dim">quiet shift…</span></div>
+  </div>
+ </div>
+</div>
+
+<div id="overlay">
+ <div class="ringbox"><div></div><div></div><div></div><div class="phone">☎</div></div>
+ <h2>INCOMING AUTOMATED EMERGENCY CALL</h2>
+ <h3>BioGuard Auto-Dispatch · node FS-017 — Ferma Străjer, jud. Timiș</h3>
+ <div class="why" id="ov-why">—</div>
+ <div class="dim">machine-generated call · sensor-verified · GPS attached</div><br>
+ <button id="answer" onclick="answerCall()">ANSWER</button>
+</div>
+
+<script>
+const el=id=>document.getElementById(id);
+// 39 background fleet nodes (stylized positions; live node drawn separately)
+const FARMS=[[238,163],[70,265],[515,124],[252,408],[378,275],[580,420],[121,135],
+ [277,260],[469,183],[407,346],[77,222],[548,296],[464,325],[188,61],[424,75],
+ [432,147],[305,186],[237,233],[189,252],[119,310],[291,397],[327,354],[368,347],
+ [413,390],[499,420],[501,384],[590,320],[489,270],[527,176],[452,65],[200,121],
+ [236,74],[301,127],[392,204],[391,253],[292,330],[172,377],[404,445],[359,440]];
+el('fleet').innerHTML=FARMS.map(([x,y],i)=>
+ `<circle cx="${x}" cy="${y}" r="4" class="farm"><title>BioGuard node #${i+1} — nominal</title></circle>`+
+ `<circle cx="${x}" cy="${y}" r="2" class="farm-core"></circle>`).join('');
+
+setInterval(()=>{el('clock').textContent=new Date().toLocaleTimeString('ro-RO')},500);
+
+// ── audio (armed by the GO ON DUTY click) ────────────────────────────────
+let AC=null, ringTimer=null;
+function tone(f,dur,when,vol){const o=AC.createOscillator(),g=AC.createGain();
+ o.frequency.value=f;o.connect(g);g.connect(AC.destination);
+ g.gain.setValueAtTime(0,when);g.gain.linearRampToValueAtTime(vol,when+.02);
+ g.gain.setValueAtTime(vol,when+dur-.05);g.gain.linearRampToValueAtTime(0,when+dur);
+ o.start(when);o.stop(when+dur);}
+function chime(){if(!AC)return;const t=AC.currentTime;tone(880,.15,t,.25);tone(660,.3,t+.18,.25);}
+function ringBurst(){if(!AC)return;const t=AC.currentTime;   // EU 425 Hz ringtone
+ tone(425,.45,t,.4);tone(425,.45,t+.6,.4);}
+function startRing(){stopRing();ringBurst();ringTimer=setInterval(ringBurst,2200);}
+function stopRing(){if(ringTimer){clearInterval(ringTimer);ringTimer=null;}}
+function goOnDuty(){try{AC=new (window.AudioContext||window.webkitAudioContext)();}catch(e){}
+ el('duty').style.display='none';log('INFO','on duty — BioGuard uplink monitoring 40 nodes');}
+
+// ── incident state machine ───────────────────────────────────────────────
+let phase='idle';          // idle | prealert | ringing | active | contained
+function log(sev,msg){const d=document.createElement('div');d.className=sev;
+ d.textContent=`${new Date().toLocaleTimeString('ro-RO')}  ${msg}`;
+ const f=el('feed');if(f.firstChild&&f.firstChild.className==='dim')f.innerHTML='';
+ f.prepend(d);}
+function setDot(color,r){const d=el('incdot');d.style.fill=color;d.setAttribute('r',r);}
+function zoomTo(x,y,w,h,ms){const s=el('map').viewBox.baseVal,
+ f={x:s.x,y:s.y,w:s.width,h:s.height},t0=performance.now();
+ (function step(t){const p=Math.min(1,(t-t0)/ms),e=p<.5?2*p*p:1-Math.pow(-2*p+2,2)/2;
+  el('map').setAttribute('viewBox',`${f.x+(x-f.x)*e} ${f.y+(y-f.y)*e} ${f.w+(w-f.w)*e} ${f.h+(h-f.h)*e}`);
+  if(p<1)requestAnimationFrame(step);})(t0);}
+
+function preAlert(msg){if(phase!=='idle')return;phase='prealert';
+ setDot('var(--warn)',8);chime();
+ el('status').className='pre';
+ el('status').innerHTML='⚠ PRE-ALERT — Ferma Străjer (jud. Timiș): '+msg+'<br><span class="dim">advance notice from BioGuard predictive layer — crew placed on standby, no dispatch yet</span>';
+ log('WARN','PRE-ALERT from BioGuard FS-017: '+msg);
+ log('WARN','→ crew Lugoj placed on standby');}
+
+function dispatch(nature,why){if(phase==='ringing'||phase==='active')return;
+ phase='ringing';setDot('var(--alert)',8);
+ el('inc-nature').textContent=nature;
+ el('ov-why').innerHTML=why;
+ el('status').className='inc';
+ el('status').textContent='⬤ INCOMING EMERGENCY CALL — Ferma Străjer, jud. Timiș';
+ el('overlay').className='show';startRing();
+ log('EMERG','AUTOMATED 112 CALL — BioGuard FS-017: '+nature);}
+
+function answerCall(){stopRing();el('overlay').className='';phase='active';
+ el('incident').className='card show';
+ el('incgroup').style.display='';
+ el('status').className='inc';
+ el('status').textContent='⬤ ACTIVE INCIDENT — Ferma Străjer · crew Lugoj dispatched · ETA ~26 min';
+ zoomTo(0,155,280,200,900);
+ log('EMERG','call answered — dispatching 1× autospecială + SMURD from Stația Lugoj');
+ log('INFO','GPS + live telemetry link opened to responding crew');}
+
+function contain(){if(phase!=='active'&&phase!=='prealert'&&phase!=='ringing')return;
+ stopRing();el('overlay').className='';
+ phase='contained';setDot('var(--ok)',6);
+ el('incgroup').style.display='none';
+ el('status').className='';
+ el('status').innerHTML='<span class="ok">SITUATION CONTAINED</span> — Ferma Străjer back to normal · 40 farms reporting';
+ el('inc-title').textContent='✓ INCIDENT CLOSED';el('inc-title').style.animation='none';
+ zoomTo(0,0,672,480,900);
+ log('OK','BioGuard FS-017 reports values back in the safe band — incident closed');
+ setTimeout(()=>{if(phase==='contained'){phase='idle';
+   el('incident').className='card';el('inc-title').textContent='⬤ ACTIVE INCIDENT';
+   el('inc-title').style.animation='';el('status').textContent='NO ACTIVE INCIDENTS — 40 farms reporting normal';}},12000);}
+
+// ── SSE: same stream the main dashboard reads ────────────────────────────
+function onTel(t){const g=t.gas?t.gas.v:null,fl=t.flame?t.flame.v:null,t1=t.t1?t.t1.v:null;
+ if(g!==null){el('tel-gas').textContent=Math.round(g)+(g>=700?'  — EXPLOSIVE':'');
+   el('tel-gas').className='tel'+(g>=700?' bad':'');}
+ if(fl!==null){el('tel-flame').textContent=fl>0?'DETECTED':'clear';
+   el('tel-flame').className='tel'+(fl>0?' bad':'');}
+ if(t1!==null)el('tel-t1').textContent=Math.round(t1)+'°C';}
+function onEvent(e){const p=e.raw.split('|');
+ if(p[0]==='AI'&&p[1]==='PREDICT'&&(e.sev==='WARN'||e.sev==='ALERT'))preAlert(p[4]||'');
+ if(p[0]==='EVT'&&e.sev==='EMERG'){
+  if(p[3]==='FLAME_DETECTED')dispatch('FIRE — flame sensor triggered (feed & water store)',
+    'Flame detected in the feed store.<br>CH4 + hay environment — <b>high fire spread risk</b>.<br>Sprinkler + ventilation already actuated by the on-site reflex layer.');
+  else if(p[3]==='GAS_CRITICAL')dispatch('EXPLOSIVE ATMOSPHERE — CH4 critical (manure pit)',
+    'Methane above the critical threshold in the manure pit.<br><b>Explosion risk — livestock and one family on site.</b><br>Power to the pit cut and extraction running (automatic).');}
+ if(p[0]==='EVT'&&(p[3]==='GAS_CLEARED'))contain();}
+const es=new EventSource('/stream');
+es.onmessage=ev=>{const m=JSON.parse(ev.data);
+ if(m.type==='tel')onTel(m.tel);
+ else if(m.type==='event')onEvent(m.event);
+ else if(m.type==='state'&&(m.mode==='DAY'||m.mode==='NIGHT')&&phase==='active')contain();
+ else if(m.type==='hello'){el('uplink').className='pill on';
+   el('uplink').textContent='BioGuard uplink: LIVE';
+   onTel(m.state.tel||{});}};
+es.onerror=()=>{el('uplink').className='pill off';el('uplink').textContent='BioGuard uplink: lost';};
 </script></body></html>"""
 
 if __name__ == "__main__":

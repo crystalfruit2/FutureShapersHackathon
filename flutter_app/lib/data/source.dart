@@ -36,7 +36,9 @@ class ConnMsg extends SourceMsg {
 
 abstract class StrajerDataSource {
   Stream<SourceMsg> get messages;
-  Future<void> command(String action); // ARM DISARM FAN_ON FAN_OFF VENT DUMPLOG
+  // ARM DISARM FAN_ON FAN_OFF VENT DUMPLOG … — role+pin ride along so the
+  // bridge (the enforcement point) can apply RBAC and its PIN gate.
+  Future<void> command(String action, {String role = 'admin', String pin = ''});
   Future<void> simulate(String name, num value); // SIM| injection
   Future<void> replayAttack(); // the cyber-demo button
   void start();

@@ -171,7 +171,20 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> command(String a) async => _source?.command(a);
+  /// Who is holding the phone. Sent with every command — the BRIDGE enforces
+  /// (403 + SEC event on the wire); the UI only mirrors it by disabling taps.
+  String role = 'admin';
+
+  void setRole(String r) {
+    role = r;
+    _localEvent('SEC|ROLE_SWITCHED|${r.toUpperCase()}', Severity.sec);
+  }
+
+  /// The app is a PIN-guarded client: dangerous taps re-ask the panel PIN in
+  /// the UI (PinDialog), and protected commands carry the panel code so the
+  /// bridge's PIN gate holds against every client that is NOT this app.
+  Future<void> command(String a, {String? pin}) async =>
+      _source?.command(a, role: role, pin: pin ?? _pin.join());
 
   String get _timeNow {
     final n = DateTime.now();
@@ -195,7 +208,7 @@ class AppState extends ChangeNotifier {
         List.generate(4, (i) => digits[i] == _pin[i]).every((x) => x)) {
       pinFails = 0;
       pinLockUntil = null;
-      command('DISARM');
+      command('DISARM', pin: digits.join()); // the digits the user just proved
       _localEvent('EVT|0|ctrl|PIN_OK_DISARMED|0|INFO', Severity.info);
       return PinResult.ok;
     }

@@ -107,7 +107,8 @@ class BridgeDataSource implements StrajerDataSource {
   }
 
   @override
-  Future<void> command(String action) => _post('/cmd', {'action': action});
+  Future<void> command(String action, {String role = 'admin', String pin = ''}) =>
+      _post('/cmd', {'action': action, 'role': role, 'pin': pin});
 
   @override
   Future<void> simulate(String name, num value) =>
