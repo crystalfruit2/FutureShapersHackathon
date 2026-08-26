@@ -1,5 +1,10 @@
+import 'dart:convert';
+
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../data/bridge_source.dart';
+import '../data/source.dart';
 import '../main.dart';
 import '../models.dart';
 import 'theme.dart';
@@ -583,6 +588,79 @@ class _ConnectionPanelState extends State<_ConnectionPanel> {
           ),
           onSubmitted: (v) => app.useBridge(v.trim()),
         ),
+        if (kIsWeb)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton(
+              onPressed: () {
+                // The page was served by the bridge, so its own origin is the
+                // bridge — one tap out of any wrong address (the sensor
+                // board's IP is a tempting, and wrong, thing to paste here).
+                _url.text = BridgeDataSource.normalise(Uri.base.origin);
+                app.useBridge(_url.text);
+              },
+              style: TextButton.styleFrom(
+                  foregroundColor: T.accent,
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  minimumSize: Size.zero),
+              child: const Text('Use the laptop serving this page'),
+            ),
+          ),
+        const SizedBox(height: 8),
+        _BoardCard(board: app.board),
+      ]),
+    );
+  }
+}
+
+/// What the physical ESP32 sensor board is actually saying, verbatim. The
+/// bridge converts raw ADC counts server-side, so the honest thing to show an
+/// engineer is both halves: the board's own JSON and what we made of it.
+class _BoardCard extends StatelessWidget {
+  final BoardMsg? board;
+  const _BoardCard({required this.board});
+
+  @override
+  Widget build(BuildContext context) {
+    final b = board;
+    final ok = b?.connected == true;
+    final raw = (b?.raw.isNotEmpty ?? false)
+        ? const JsonEncoder.withIndent('  ').convert(b!.raw)
+        : (b == null
+            ? 'bridge has no sensor board configured (start it with --esp)'
+            : 'no reply from ${b.url}');
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: T.hairline),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          StatusDot(ok ? T.ok : T.sub, size: 8),
+          const SizedBox(width: 8),
+          Text('Sensor board${ok ? ' — live' : ''}',
+              style: Theme.of(context).textTheme.bodySmall),
+        ]),
+        const SizedBox(height: 8),
+        Text(raw,
+            style: const TextStyle(
+                fontFamily: 'Menlo', fontSize: 12, color: T.accent)),
+        if (b != null && b.converted.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          Text(
+              'bridge converts → '
+              '${b.converted.entries.map((e) => '${e.key}=${e.value}').join(' · ')}',
+              style: const TextStyle(fontSize: 12, color: T.sub)),
+        ],
+        if (b != null && b.pinned.isNotEmpty) ...[
+          const SizedBox(height: 6),
+          Text(
+              '${b.pinned.join(', ')} held by a simulator pin — '
+              'the board is ignored there until it is released',
+              style: const TextStyle(fontSize: 12, color: T.warn)),
+        ],
       ]),
     );
   }

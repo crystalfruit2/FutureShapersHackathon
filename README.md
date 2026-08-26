@@ -33,7 +33,8 @@ The physical sensors arrived as a standalone board, not GPIO on the Pi: it is a 
 0-4095 ADC counts — conversion is our job, server side** (the board's FPU is too slow).
 Conversion (identical in `dashboard/app.py` and `pi_node/bioguard_node.py`):
 gas → 0-1023 a.u. (keeps the 700 critical limit everywhere) · water_level → 0-100 % ·
-temperature → `t1` · humidity → `hum`. A `null`/missing channel stays simulated per-key and
+temperature → `t1` · humidity → `hum` · sound_level → `snd`, a flag: the level is auto-baselined
+to the room (EMA) and only trips above it, so a loud venue does not read as a restless flock. A `null`/missing channel stays simulated per-key and
 takes over automatically the moment it appears.
 
 **Connect (laptop, macOS)** — manual IP because there is no DHCP; this drops internet, which
@@ -45,6 +46,17 @@ networksetup -setmanual Wi-Fi 192.168.4.2 255.255.255.0 192.168.4.1
 python3 dashboard/app.py --esp                    # default http://192.168.4.1/
 networksetup -setdhcp Wi-Fi                       # restore normal WiFi afterwards
 ```
+
+**Seeing exactly what the board said** — the same object in all three UIs, so they can never
+disagree about the hardware: bench card *SENSOR BOARD — RAW JSON*, the app's Controls →
+*Sensor board*, or `curl http://localhost:5001/api/board`. It carries the board's own JSON, the
+bridge's conversion of it, the live channels and any channel a SIM pin is holding.
+
+⚠️ **A test sequence steals the channels it drives.** `SIM|gas=…` pins `gas`, and a pin outranks
+the board — run GAS RAMP or FLAME once and the real board's gas is ignored until you hand it
+back. `SIM|gas=` with **no value** releases one channel; the bench button
+**RELEASE SIM PINS → BOARD** releases all five (`gas t1 hum water snd`). The board card names any
+pinned channel in red, so "why is gas not live?" is answerable at a glance.
 
 `--esp` implies the local state machine (`--fake`), so the 4 real channels ride alongside the
 simulated ones — organizer-sanctioned for the sensors we weren't given. Precedence per
@@ -64,9 +76,71 @@ mask `255.255.255.0`), and point the app's bridge URL (Controls → bridge) at
 `http://192.168.4.2:5001`. The Fleet tab keeps working over mobile data since it reads
 Firestore directly.
 
+### Stage day — two commands, in this order
+
+```
+sudo scripts/bioguard-net.sh on     # Wi-Fi -> board's AP, internet stays on USB Ethernet / iPhone USB
+python3 scripts/preflight.py        # read-only, ~10 s: "if I start now, what happens?"
+```
+
+`bioguard-net.sh` refuses to run if no second interface is up, rather than taking the internet
+down with it; `off` puts Wi-Fi back on DHCP and restores the service order. `preflight.py` checks
+the bridge, the web app's base href, the board link, simulator pins, the **gas resting level
+against the 700 limit**, null channels, a water probe reading 0, and whether the farm is already
+in EMERGENCY — printing the exact fix command for each. Exit code 0 means safe to start.
+
+🔴 **The gas sensor's resting level decides whether the alarm works.** MQ sensors rail near 4095
+while warming up — 4095 converts to 1023 a.u., over the 700 limit, so the show would **open in
+EMERGENCY**. Power the board 3-5 minutes before the demo and rerun the pre-flight; a resting
+value around 1900 raw (475 a.u.) leaves 225 of headroom, which a puff of gas crosses immediately.
+If it will not settle, pin it safe (`SIM|gas=120`) and run the alarm off the bench, which is the
+rehearsed path anyway.
+
+**The gas ladder, in the units the board actually reports** (`a.u. = raw × 1023/4095`):
+
+| gas | raw ADC | what fires |
+|---|---|---|
+| rising, forecast crossing ≤ 300 s | — | `AI|PREDICT` WARN → `/fire` **PRE-ALERT**, crew on standby, chime |
+| rising, forecast ≤ 90 s | — | PREDICT escalates to ALERT |
+| **≥ 700** | **≥ 2802** | `GAS_CRITICAL` → `STATE|EMERGENCY` → **full-screen 112 call** (425 Hz ring, ANSWER), app takeover, relay cut + fan + vent |
+| < 400 | < 1602 | `GAS_CLEARED` → **"situation contained"** |
+
+PREDICT also needs a learned baseline (`--baseline`, default 45 s), ≥ 8 samples, a rise of
+≥ 14 a.u./min sustained over ≥ 5 samples, and the channel ≥ 2σ above its own baseline. So a slow
+approach earns the pre-alert; shoving the source at the sensor jumps straight to the 112 call.
+
+⚠️ **The clear threshold is below a real sensor's resting value.** Alp's board rests at ~492 a.u.
+(raw 1968) but EMERGENCY only lifts under 400 — so on real hardware the farm can enter EMERGENCY
+and never leave, and the contained beat never plays. The simulator hides this: it rests at 120.
+Either ventilate below raw 1602 or close the beat with `SIM|gas=120`. Pre-flight checks this.
+
+Measured end-to-end on the mock board (26.08): raw 3050 → 762 a.u. →
+`EVT|0|pit|GAS_CRITICAL|762|EMERG` → `STATE|EMERGENCY`, with the analyst reaching risk 1.00 and
+`CH4 critical in 4s` *before* the crossing. `/fire` consumes the same stream, so the 112 dispatch
+call rides on that event.
+
 **Rehearsal without the hardware:** `python3 dashboard/mock_board.py` serves the exact same
 JSON (incl. `--nulls` for the temp/hum-unwired state) on `:8181` →
-`python3 dashboard/app.py --esp http://127.0.0.1:8181/`.
+`python3 dashboard/app.py --esp http://127.0.0.1:8181/`. `--gas N` pins the raw count so the
+alarm beat can be rehearsed to the second (`--gas 3050` crosses the limit; `--gas 1900` rests).
+
+## BioGuard web app — served BY the bridge at `/app/`
+
+```
+flutter build web --release --base-href /app/     # ← the --base-href is NOT optional
+```
+
+🔴 **Rebuild it any other way and the page comes up blank parchment and nothing else.** Flutter
+writes `<base href="/">` by default; every script URL then resolves against the bridge's ROOT, so
+`flutter_bootstrap.js` fetches the *dashboard HTML* with a 200 and the engine never starts. There
+is no error on screen and no 404 in the log — it looks like the app is broken. (Cost us a debug
+round on 26.08.) The app is then at `http://localhost:5001/app/`, same origin as the bridge, so
+on web it points at itself and needs no address typed in.
+
+⚠️ **The bridge address field is the BRIDGE, never the sensor board.** `http://192.168.4.1/` is
+the ESP32; it serves sensor JSON, not `/stream`, and the app just says "Failed to fetch". On web
+the field is filled from the page's own origin and *Use the laptop serving this page* puts it
+back one tap. From a phone on the BioGuard AP it is `http://192.168.4.2:5001`.
 
 ## Dashboard (`dashboard/`, laptop)
 ```

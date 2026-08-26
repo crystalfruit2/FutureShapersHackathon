@@ -47,6 +47,7 @@ class AppState extends ChangeNotifier {
   DateTime _lastEmergSound = DateTime.fromMillisecondsSinceEpoch(0);
   Timer? _secTimer;
   StrajerEvent? lastSec; // latest cyber event, for the toast
+  BoardMsg? board; // physical sensor board behind the bridge, verbatim
 
   AppState() {
     _restorePrefs();
@@ -55,7 +56,12 @@ class AppState extends ChangeNotifier {
   Future<void> _restorePrefs() async {
     final p = await SharedPreferences.getInstance();
     // on web the app is served BY the bridge — same origin is the bridge URL
-    bridgeUrl = p.getString('bridgeUrl') ?? (kIsWeb ? Uri.base.origin : bridgeUrl);
+    // On web the app is SERVED BY the bridge, so the origin is the only
+    // correct answer — a stored address from another machine (or the sensor
+    // board's own IP, which is not the bridge) can only strand the app.
+    bridgeUrl = kIsWeb
+        ? Uri.base.origin
+        : BridgeDataSource.normalise(p.getString('bridgeUrl') ?? bridgeUrl);
     useFake(); // always boot into demo data; user switches to live in Controls
   }
 
@@ -93,6 +99,7 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> useBridge(String url) async {
+    url = BridgeDataSource.normalise(url);
     usingBridge = true;
     bridgeUrl = url;
     // attach first, persist after — awaiting prefs before _attach let a fast
@@ -100,6 +107,7 @@ class AppState extends ChangeNotifier {
     _attach(BridgeDataSource(url));
     final p = await SharedPreferences.getInstance();
     await p.setString('bridgeUrl', url);
+    notifyListeners();
   }
 
   void _onMsg(SourceMsg m) {
@@ -164,6 +172,8 @@ class AppState extends ChangeNotifier {
             _secTimer = Timer(const Duration(seconds: 6), clearSecToast);
           }
         }
+      case BoardMsg():
+        board = m;
       case AiMsg():
         risk = m.risk;
       case AuditMsg():

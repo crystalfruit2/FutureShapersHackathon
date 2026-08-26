@@ -122,6 +122,9 @@ fake_on = False
 esp_url = None            # Oleksandr's ESP32 sensor board — set by --esp
 esp_live = False
 esp_real = set()          # channels currently fed by the real board
+esp_raw = {}              # last JSON exactly as the board served it (shown in every UI)
+esp_conv = {}             # …and what the bridge converted it into
+esp_snd_base = None       # self-calibrating ambient for the board's sound level
 
 def publish(msg: dict):
     for q in list(subscribers):
@@ -331,7 +334,15 @@ fake = {"gas":120,"nh3":8,"flame":0,"t1":24,"t2":24,"hum":55,"water":72,"food":5
 
 def fake_rx(s: str):
     if s.startswith("SIM|"):
-        k, v = s[4:].split("=");  fake[k] = float(v); fake["sim"].add(k)
+        # "SIM|gas=750" pins a channel to an injected value; "SIM|gas=" (no
+        # value) RELEASES it. Without the release path a single test sequence
+        # pinned the channel for the life of the process and the real board
+        # could never take it back — the bug that hid the board's gas reading.
+        k, _, v = s[4:].partition("=")
+        if v == "":
+            fake["sim"].discard(k)
+        else:
+            fake[k] = float(v); fake["sim"].add(k)
     elif s.startswith("FW|"):
         # signed-update demo: device only flashes an image whose signature
         # verifies against the shared secret (same primitive as the CMD MAC)
@@ -435,11 +446,21 @@ def fake_loop():
 # demo mechanism, incl. the NIST replay) > board > generated.
 
 def esp_convert(j: dict) -> dict:
+    global esp_snd_base
     out = {}
     if j.get("gas") is not None:         out["gas"]   = round(float(j["gas"]) * 1023 / 4095)
     if j.get("temperature") is not None: out["t1"]    = round(float(j["temperature"]), 1)
     if j.get("humidity") is not None:    out["hum"]   = round(float(j["humidity"]), 1)
     if j.get("water_level") is not None: out["water"] = round(float(j["water_level"]) * 100 / 4095)
+    # The board reports a raw sound LEVEL; every layer above wants a flag
+    # ("flock restless"). A fixed threshold is useless — a hackathon hall is
+    # not a quiet barn — so the channel auto-baselines to the room and only
+    # trips on a genuine excursion above that ambient. It therefore starts
+    # calm no matter how loud the venue is.
+    if j.get("sound_level") is not None:
+        lvl = float(j["sound_level"])
+        esp_snd_base = lvl if esp_snd_base is None else esp_snd_base * 0.97 + lvl * 0.03
+        out["snd"] = 1 if lvl > max(esp_snd_base * 1.6, esp_snd_base + 250) else 0
     return out
 
 def esp_loop(url: str):
@@ -449,8 +470,14 @@ def esp_loop(url: str):
     while True:
         try:
             with urllib.request.urlopen(url, timeout=2) as r:
-                vals = {k: v for k, v in esp_convert(json.loads(r.read().decode())).items()
-                        if k not in fake["sim"]}
+                raw = json.loads(r.read().decode())
+            esp_raw.clear();  esp_raw.update(raw)
+            conv = esp_convert(raw)
+            esp_conv.clear(); esp_conv.update(conv)
+            # a SIM-pinned channel is not stomped by the board, but the UI must
+            # still be able to SAY so — otherwise "why is gas not live?" costs
+            # ten minutes on stage
+            vals = {k: v for k, v in conv.items() if k not in fake["sim"]}
             fails = 0
             for k, v in vals.items():
                 fake[k] = v
@@ -458,14 +485,18 @@ def esp_loop(url: str):
             if not esp_live:
                 esp_live = True
                 handle_line(f"EVT|0|ctrl|BOARD_LINK|{'+'.join(sorted(vals)) or 'none'}|INFO")
-            publish({"type":"esp", "connected":True, "url":url, "channels":sorted(esp_real)})
+            publish({"type":"esp", "connected":True, "url":url,
+                     "channels":sorted(esp_real), "raw":dict(esp_raw),
+                     "converted":dict(esp_conv),
+                     "pinned":sorted(k for k in conv if k in fake["sim"])})
         except Exception as e:
             fails += 1
             if esp_live and fails >= 3:   # one dropped poll must not flap the demo
                 esp_live = False
-                esp_real.clear()
+                esp_real.clear(); esp_raw.clear(); esp_conv.clear()
                 handle_line("EVT|0|ctrl|BOARD_LOST|sim_fallback|WARN")
-                publish({"type":"esp", "connected":False, "url":url, "detail":str(e)[:80]})
+                publish({"type":"esp", "connected":False, "url":url, "detail":str(e)[:80],
+                         "raw":{}, "converted":{}, "pinned":[]})
         time.sleep(1)
 
 # ── Tier-2 analyst: prediction · baseline drift · plausibility ───────────
@@ -863,7 +894,9 @@ def stream():
                "events":list(events)[-30:], "raws":list(raw_log)[-100:],
                "counters":counters, "ai":analyst.snapshot(),
                "serial":{"connected":ser is not None, "port":ser_port},
-               "esp":{"connected":esp_live, "url":esp_url, "channels":sorted(esp_real)}})
+               "esp":{"connected":esp_live, "url":esp_url, "channels":sorted(esp_real),
+                      "raw":dict(esp_raw), "converted":dict(esp_conv),
+                      "pinned":sorted(k for k in esp_conv if k in fake["sim"])}})
         try:
             while True:
                 yield f"data: {json.dumps(q.get())}\n\n"
@@ -886,6 +919,15 @@ def connect():
 def disconnect():
     ser_stop.set()
     return {"ok": True}
+
+@app.route("/api/board")
+def api_board():
+    """Exactly what the sensor board served on its last poll, plus what the
+    bridge made of it. Same object the dashboard card and the app card read,
+    so all three views can never disagree about what the hardware said."""
+    return {"connected": esp_live, "url": esp_url, "raw": dict(esp_raw),
+            "converted": dict(esp_conv), "live_channels": sorted(esp_real),
+            "pinned": sorted(k for k in esp_conv if k in fake["sim"])}
 
 @app.route("/raw", methods=["POST"])
 def raw():
@@ -1165,6 +1207,12 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
    <div class="zone" id="z-store"><h3>FEED & WATER STORE</h3><div class="v" id="v-store">—</div></div>
    <div class="zone" id="z-ctrl"><h3>CONTROL ROOM</h3><div class="v" id="v-ctrl">—</div></div>
   </div></div>
+ <div class="card" style="flex:1.1"><div class="dim">SENSOR BOARD — RAW JSON <span id="brdstate" class="dim"></span></div>
+  <pre id="brdraw" style="margin:6px 0 0;font-size:12px;line-height:1.5;color:#7fd4ff;white-space:pre-wrap">board not polled — start with --esp</pre>
+  <div id="brdconv" class="dim" style="font-size:12px;margin-top:6px"></div>
+  <div id="brdpin" style="font-size:12px;margin-top:6px;color:#f0a"></div>
+  <button class="acc" style="margin-top:8px" onclick="releaseBoard()">RELEASE SIM PINS → BOARD</button>
+ </div>
  <div class="card"><div class="dim">SIMULATED SENSORS <span class="simtag">SIM</span> — organizer-sanctioned stand-ins</div>
   <div class="sl"><label>NH3 ammonia (hall) — limit 25 ppm</label><input type="range" min="0" max="80" value="8" oninput="sim('nh3',this.value)"></div>
   <div class="sl"><label>Gas CH4 (pit)</label><input type="range" min="0" max="1023" value="120" oninput="sim('gas',this.value)"></div>
@@ -1210,9 +1258,25 @@ function onSerial(s){const p=el('serialpill');
  p.className='pill '+(s.connected?'on':'off');
  p.textContent='serial: '+(s.connected?(s.port||'?'):(s.detail||'none'));}
 function onEsp(s){const p=el('esppill');
- if(!s.url&&!s.connected){p.style.display='none';return}
- p.style.display='';p.className='pill '+(s.connected?'on':'off');
- p.textContent='board: '+(s.connected?'LIVE '+((s.channels||[]).join('+')||'—'):'lost — sim fallback');}
+ if(!s.url&&!s.connected){p.style.display='none';}else{
+  p.style.display='';p.className='pill '+(s.connected?'on':'off');
+  p.textContent='board: '+(s.connected?'LIVE '+((s.channels||[]).join('+')||'—'):'lost — sim fallback');}
+ const st=el('brdstate');if(!st)return;
+ st.textContent=s.url?(s.connected?' · LIVE '+s.url:' · lost ('+s.url+') — sim fallback'):'';
+ const raw=s.raw&&Object.keys(s.raw).length?s.raw:null;
+ el('brdraw').textContent=raw?JSON.stringify(raw,null,1)
+   :(s.url?'no reply from '+s.url:'board not polled — start with --esp');
+ const c=s.converted||{};
+ el('brdconv').textContent=Object.keys(c).length
+   ?'bridge converts → '+Object.entries(c).map(([k,v])=>k+'='+v).join(' · '):'';
+ const pin=s.pinned||[];
+ el('brdpin').textContent=pin.length
+   ?'⚠ '+pin.join(', ')+' held by a SIM pin — the board is ignored on '+(pin.length>1?'these channels':'this channel'):'';}
+// A test sequence pins the channels it drives (SIM|gas=…). Until the pin is
+// released the real board can never take that channel back — release hands
+// every board-owned channel to the hardware again.
+function releaseBoard(){['gas','t1','hum','water','snd'].forEach(k=>
+ fetch('/raw',{method:'POST',headers:H,body:JSON.stringify({line:'SIM|'+k+'='})}));}
 function onRaw(r){const c=el('console');const d=document.createElement('div');
  d.className=r.ok?r.dir:'bad';
  d.textContent=`${r.t} ${r.dir==='rx'?'←':'→'} ${r.line}${r.ok?'':'   ⟵ UNPARSED'}`;

@@ -10,7 +10,21 @@ import 'source.dart';
 
 class BridgeDataSource implements StrajerDataSource {
   final String baseUrl; // e.g. http://192.168.1.20:5001
-  BridgeDataSource(this.baseUrl);
+  BridgeDataSource(String url) : baseUrl = normalise(url);
+
+  /// A trailing slash pasted from a browser bar produced "…//stream", which
+  /// the bridge answers with a 404 and the app reported as "Failed to fetch"
+  /// — an unreadable error for a typo. Normalise once, here, so no caller can
+  /// reintroduce it.
+  static String normalise(String url) {
+    var u = url.trim();
+    if (u.isEmpty) return u;
+    if (!u.startsWith('http://') && !u.startsWith('https://')) u = 'http://$u';
+    while (u.endsWith('/')) {
+      u = u.substring(0, u.length - 1);
+    }
+    return u;
+  }
 
   final _ctrl = StreamController<SourceMsg>.broadcast();
   http.Client? _client;
@@ -73,6 +87,8 @@ class BridgeDataSource implements StrajerDataSource {
       case 'ai':
         final risk = RiskState.fromBridge(m['ai'] as Map<String, dynamic>);
         if (risk != null) _ctrl.add(AiMsg(risk));
+      case 'esp':
+        _ctrl.add(BoardMsg.fromBridge(m));
       case 'log':
         _ctrl.add(AuditMsg([
           for (final r in (m['log'] as List))
@@ -93,6 +109,9 @@ class BridgeDataSource implements StrajerDataSource {
           final helloRisk =
               RiskState.fromBridge(m['ai'] as Map<String, dynamic>);
           if (helloRisk != null) _ctrl.add(AiMsg(helloRisk));
+        }
+        if (m['esp'] is Map<String, dynamic>) {
+          _ctrl.add(BoardMsg.fromBridge(m['esp'] as Map<String, dynamic>));
         }
     }
   }
