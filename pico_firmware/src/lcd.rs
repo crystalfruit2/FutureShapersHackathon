@@ -18,7 +18,7 @@ use crate::telemetry::TELEMETRY;
 /// i2c address of the display
 const ADDR: u8 = 0x27;
 const EMPTY_LINE: &str = "                "; // 16 spaces for clearing the line
-const DISPLAY_ROTATION_TIME_S: u64 = 7;
+const DISPLAY_ROTATION_TIME_S: u64 = 4;
 
 #[derive(Clone, Copy)]
 enum DisplayLine {
