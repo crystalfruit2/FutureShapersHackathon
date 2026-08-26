@@ -32,8 +32,14 @@ need_root() { [ "$(id -u)" -eq 0 ] || die "run it with sudo: sudo $0 $1"; }
 
 # service name -> BSD device, straight from the service order table
 dev_of() {
+  # Map a service name -> its BSD device from the service-order table. Match ONLY
+  # the numbered "(N) ServiceName" line (exact name after stripping the number);
+  # the following "(Hardware Port: ..., Device: enX)" line also contains the name
+  # and a "(", so matching on those would skip the real Device line and return the
+  # NEXT service's device (off-by-one). Anchoring to "^(N) " and comparing the
+  # exact name is POSIX-awk safe (no gawk match-array).
   networksetup -listnetworkserviceorder | awk -v s="$1" '
-    index($0, "(" ) && index($0, s) { want=1; next }
+    /^\([0-9]+\) / { name=$0; sub(/^\([0-9]+\) /,"",name); want=(name==s); next }
     want && /Device:/ { match($0, /Device: [a-z0-9]+/); print substr($0, RSTART+8, RLENGTH-8); exit }'
 }
 

@@ -9,7 +9,7 @@ import '../models.dart';
 import 'source.dart';
 
 class BridgeDataSource implements StrajerDataSource {
-  final String baseUrl; // e.g. http://192.168.4.2:5001
+  final String baseUrl; // e.g. http://192.168.4.9:5001
   BridgeDataSource(String url) : baseUrl = normalise(url);
 
   /// A trailing slash pasted from a browser bar produced "…//stream", which

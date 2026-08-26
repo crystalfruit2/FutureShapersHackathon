@@ -242,21 +242,37 @@ def reader_loop(port, baud):
         publish({"type":"serial", "connected":False, "port":None, "detail":"disconnected"})
 
 # ── scripted test sequences (run against real firmware OR fake) ──────────
+_cancel = threading.Event()          # tripped by /reset_demo to stop a running scenario
+class _Cancelled(Exception):
+    pass
+
+def _snooze(seconds):
+    """Cancellable sleep for scripted scenarios. CLEAR ALL (/reset_demo) sets
+    _cancel; the running scenario raises _Cancelled at its next _snooze and stops
+    re-pinning channels, instead of running to completion behind the reset (which
+    would re-raise the alarm the operator just cleared)."""
+    slept = 0.0
+    while slept < seconds:
+        if _cancel.is_set():
+            raise _Cancelled()
+        chunk = 0.2 if (seconds - slept) > 0.2 else (seconds - slept)
+        time.sleep(chunk); slept += chunk
+
 def script_gas_ramp():
     for v in (200, 350, 500, 650, 800, 900):
-        send_raw(f"SIM|gas={v}"); time.sleep(1.5)
-    time.sleep(4)
+        send_raw(f"SIM|gas={v}"); _snooze(1.5)
+    _snooze(4)
     for v in (500, 300, 120):
-        send_raw(f"SIM|gas={v}"); time.sleep(1.5)
+        send_raw(f"SIM|gas={v}"); _snooze(1.5)
 
 def script_replay():
     global cmd_counter
     with lock:
         cmd_counter += 1
         c = cmd_counter
-    send_raw(f"CMD|{c}|{mac_for(c,'FAN_ON')}|FAN_ON"); time.sleep(1.5)
+    send_raw(f"CMD|{c}|{mac_for(c,'FAN_ON')}|FAN_ON"); _snooze(1.5)
     send_raw(f"CMD|{c}|{mac_for(c,'FAN_ON')}|FAN_ON")          # replay -> reject
-    time.sleep(1.5)
+    _snooze(1.5)
     send_raw(f"CMD|{c+999}|0|FAN_OFF")                          # bad MAC -> reject
 
 def script_night_intruder():
@@ -264,11 +280,19 @@ def script_night_intruder():
     with lock:
         cmd_counter += 1
         c = cmd_counter
-    send_raw(f"CMD|{c}|{mac_for(c,'ARM')}|ARM"); time.sleep(2)
-    send_raw("SIM|mot=1"); time.sleep(3); send_raw("SIM|mot=0")
+    send_raw(f"CMD|{c}|{mac_for(c,'ARM')}|ARM"); _snooze(2)
+    send_raw("SIM|mot=1"); _snooze(3); send_raw("SIM|mot=0")
 
 def script_flame():
-    send_raw("SIM|flame=1"); time.sleep(5); send_raw("SIM|flame=0")
+    # Drive the hall temperature up while flame is asserted so the /fire
+    # corroboration gate (needs +5 C over ambient, OR gas critical) fires
+    # deterministically — even when the real board owns the temp channel and
+    # would otherwise report it flat, leaving /fire stuck on "HELD". Release t1
+    # afterwards so the board reclaims it.
+    send_raw("SIM|flame=1")
+    for t in (25, 27, 29, 31, 33):
+        send_raw(f"SIM|t1={t}"); _snooze(1)
+    send_raw("SIM|flame=0"); send_raw("SIM|t1=")
 
 def script_slow_creep():
     """The AI money shot: a leak too slow for a fixed threshold to see coming.
@@ -276,8 +300,8 @@ def script_slow_creep():
     analyst forecasts the crossing ~60 s earlier."""
     v = 120
     while v < 720:
-        send_raw(f"SIM|gas={v}"); v += 20; time.sleep(2.5)
-    time.sleep(6)
+        send_raw(f"SIM|gas={v}"); v += 20; _snooze(2.5)
+    _snooze(6)
     send_raw("SIM|gas=120")
 
 def script_nh3_drift():
@@ -285,8 +309,8 @@ def script_nh3_drift():
     stops below the 25 ppm limit. Only the learned baseline catches it.
     Requires the baseline to be learned first (watch the AI panel)."""
     for v in range(8, 23):
-        send_raw(f"SIM|nh3={v}"); time.sleep(4)
-    time.sleep(30)          # plateau: threshold silent, PREDICT lapses, DRIFT holds
+        send_raw(f"SIM|nh3={v}"); _snooze(4)
+    _snooze(30)          # plateau: threshold silent, PREDICT lapses, DRIFT holds
     send_raw("SIM|nh3=8")
 
 def script_nist_smoulder():
@@ -309,8 +333,8 @@ def script_nist_smoulder():
         # its own event; the smoulder's real signature is the -6% sag
         send_raw(f"SIM|hum={55 + rh - rh0:.0f}")
         send_raw(f"SIM|gas={min(1023.0, 120 + smoke * 3.4):.0f}")
-        time.sleep(1.0)
-    time.sleep(4)
+        _snooze(1.0)
+    _snooze(4)
     for k, v in (("gas", 120), ("t1", 24), ("hum", 55)):
         send_raw(f"SIM|{k}={v}")
 
@@ -937,8 +961,13 @@ def raw():
 script_busy = {"name": None}   # two interleaved scripts fight over SIM|gas
 
 def _run_script(name):
+    _cancel.clear()
     try:
         SCRIPTS[name]()
+    except _Cancelled:
+        events.append({"raw":f"DASH|scenario '{name}' stopped by CLEAR ALL",
+                       "t":now_t(), "sev":"INFO"})
+        publish({"type":"event","event":events[-1]})
     finally:
         script_busy["name"] = None
 
@@ -966,6 +995,7 @@ def reset_demo():
     flame/intruder, restore actuators, drop any lockdown, farm to DAY, and reset
     the 112 dispatch screen. Safe to hit between scenarios; if the real board is
     live it reclaims its channels on the next poll."""
+    _cancel.set()                                    # stop any running scenario thread
     with lock:
         script_busy["name"] = None
         fake["sim"] = set(["nh3", "flame"])          # boot default: hand gas/mot/water/t1/hum back
