@@ -18,6 +18,7 @@ use crate::telemetry::TELEMETRY;
 /// i2c address of the display
 const ADDR: u8 = 0x27;
 const EMPTY_LINE: &str = "                "; // 16 spaces for clearing the line
+const DISPLAY_ROTATION_TIME_S: u64 = 7;
 
 #[derive(Clone, Copy)]
 enum DisplayLine {
@@ -71,6 +72,44 @@ async fn display_gas(
     }
 }
 
+async fn display_temperature(
+    lcd: &mut HD44780<I2CBus<I2c<'static, I2C0, Async>>>,
+    delay: &mut Delay
+) {
+    write_line(DisplayLine::Top, "Temperature:", lcd, delay).await;
+    let level = {
+        let t = TELEMETRY.lock().await;
+        t.temperature
+    };
+
+    if level.is_none() {
+        write_line(DisplayLine::Bottom, "---", lcd, delay).await;
+    } else {
+        let mut string: String<32> = String::new();
+        write!(string, "{}", level.unwrap()).unwrap();
+        write_line(DisplayLine::Bottom, string.as_str(), lcd, delay).await;
+    }
+}
+
+async fn display_humidity(
+    lcd: &mut HD44780<I2CBus<I2c<'static, I2C0, Async>>>,
+    delay: &mut Delay
+) {
+    write_line(DisplayLine::Top, "Humidity:", lcd, delay).await;
+    let level = {
+        let t = TELEMETRY.lock().await;
+        t.humidity
+    };
+
+    if level.is_none() {
+        write_line(DisplayLine::Bottom, "---", lcd, delay).await;
+    } else {
+        let mut string: String<32> = String::new();
+        write!(string, "{}", level.unwrap()).unwrap();
+        write_line(DisplayLine::Bottom, string.as_str(), lcd, delay).await;
+    }
+}
+
 #[embassy_executor::task]
 pub async fn display_task(i2c: I2c<'static, I2C0, Async>) {
     // initial setup
@@ -90,8 +129,8 @@ pub async fn display_task(i2c: I2c<'static, I2C0, Async>) {
     lcd.clear(&mut delay).unwrap();
 
     let mut rx = STATE.receiver().unwrap();
+    Timer::after_secs(2).await;
     loop {
-        Timer::after_secs(2).await;
         let state = rx.get().await;
         match state {
             State::Alert(alert_type) => {
@@ -112,5 +151,10 @@ pub async fn display_task(i2c: I2c<'static, I2C0, Async>) {
             _ => {}
         }
         display_gas(&mut lcd, &mut delay).await;
+        Timer::after_secs(DISPLAY_ROTATION_TIME_S).await;
+        display_temperature(&mut lcd, &mut delay).await;
+        Timer::after_secs(DISPLAY_ROTATION_TIME_S).await;
+        display_humidity(&mut lcd, &mut delay).await;
+        Timer::after_secs(DISPLAY_ROTATION_TIME_S).await;
     }
 }
