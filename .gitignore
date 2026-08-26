@@ -3,3 +3,10 @@
 */.vscode/c_cpp_properties.json
 */.vscode/launch.json
 */.vscode/ipch
+__pycache__/
+attract/frames/
+attract/co_frames/
+attract/shots/
+
+# generated demo fleet (regenerate: python3 -m cloud.seed --days 30)
+dashboard/cloud_local.json

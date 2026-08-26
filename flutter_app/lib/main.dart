@@ -1,0 +1,445 @@
+import 'dart:async';
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'data/bridge_source.dart';
+import 'data/fake_source.dart';
+import 'data/source.dart';
+import 'models.dart';
+import 'ui/controls_screen.dart';
+import 'ui/forecast_screen.dart';
+import 'ui/boot_screen.dart';
+import 'ui/emergency_overlay.dart';
+import 'ui/events_screen.dart';
+import 'ui/fleet_screen.dart';
+import 'ui/home_screen.dart';
+import 'ui/theme.dart';
+
+void main() => runApp(const StrajerApp());
+
+/// Single app-wide state. UI listens to this; it consumes whichever
+/// StrajerDataSource is active (demo generator or the laptop bridge).
+class AppState extends ChangeNotifier {
+  StrajerDataSource? _source;
+  StreamSubscription? _sub;
+
+  FarmMode mode = FarmMode.unknown;
+  Telemetry tel = const Telemetry({});
+  final List<StrajerEvent> events = [];
+  List<AuditRecord> audit = [];
+  RiskState? risk;
+  bool connected = false;
+  String connDetail = 'Starting…';
+  bool usingBridge = false;
+  String bridgeUrl = 'http://192.168.1.20:5001';
+  bool emergencyAcked = false;
+  bool intruderActive = false; // full-screen intrusion takeover pending ack
+  bool sceneRunning = false;
+  int pinFails = 0;
+  DateTime? pinLockUntil;
+  DateTime? _authUntil; // remote control is unlocked until this moment
+  Timer? _authTicker;
+  String _ackedEmergKey = ''; // zone+type that was acknowledged
+  DateTime? _leftEmergencyAt; // flap guard: mode briefly leaving+re-entering EMERGENCY is the same episode
+  DateTime _lastEmergSound = DateTime.fromMillisecondsSinceEpoch(0);
+  Timer? _secTimer;
+  StrajerEvent? lastSec; // latest cyber event, for the toast
+
+  AppState() {
+    _restorePrefs();
+  }
+
+  Future<void> _restorePrefs() async {
+    final p = await SharedPreferences.getInstance();
+    // on web the app is served BY the bridge — same origin is the bridge URL
+    bridgeUrl = p.getString('bridgeUrl') ?? (kIsWeb ? Uri.base.origin : bridgeUrl);
+    useFake(); // always boot into demo data; user switches to live in Controls
+  }
+
+  int _epoch = 0; // bumped per source; a scene started on an old source aborts
+
+  void _attach(StrajerDataSource s) {
+    _epoch++;
+    _sub?.cancel();
+    _source?.dispose();
+    _source = s;
+    events.clear();
+    audit = [];
+    tel = const Telemetry({});
+    mode = FarmMode.unknown;
+    risk = null;
+    // per-connection / per-episode state must not leak across a source switch:
+    // a stale green "Live" chip, or an ack from Demo swallowing a real live
+    // emergency inside the flap window
+    connected = false;
+    connDetail = 'Connecting…';
+    emergencyAcked = false;
+    intruderActive = false;
+    _ackedEmergKey = '';
+    _leftEmergencyAt = null;
+    _secTimer?.cancel();
+    lastSec = null;
+    _sub = s.messages.listen(_onMsg);
+    s.start();
+    notifyListeners();
+  }
+
+  void useFake() {
+    usingBridge = false;
+    _attach(FakeDataSource());
+  }
+
+  Future<void> useBridge(String url) async {
+    usingBridge = true;
+    bridgeUrl = url;
+    // attach first, persist after — awaiting prefs before _attach let a fast
+    // Live→Demo tap sequence end with the bridge attached under a "Demo" chip
+    _attach(BridgeDataSource(url));
+    final p = await SharedPreferences.getInstance();
+    await p.setString('bridgeUrl', url);
+  }
+
+  void _onMsg(SourceMsg m) {
+    switch (m) {
+      case TelMsg():
+        tel = m.tel;
+      case ModeMsg():
+        final was = mode;
+        mode = m.mode;
+        if (mode == FarmMode.emergency && was != FarmMode.emergency) {
+          // a firmware that oscillates out of and back into EMERGENCY within a
+          // few seconds is the same episode — don't undo the farmer's ack;
+          // a genuinely different emergency still re-raises via the event key
+          final flap = _leftEmergencyAt != null &&
+              DateTime.now().difference(_leftEmergencyAt!) <
+                  const Duration(seconds: 5);
+          if (!flap) {
+            emergencyAcked = false;
+            _ackedEmergKey = '';
+            HapticFeedback.heavyImpact();
+          }
+        } else if (was == FarmMode.emergency && mode != FarmMode.emergency) {
+          _leftEmergencyAt = DateTime.now();
+        }
+      case EventMsg():
+        // ACK|<ctr> / NAK|<ctr> are protocol plumbing, not farmer events —
+        // rendered raw they become tiles titled with a bare counter number
+        if (m.event.raw.startsWith('ACK|') || m.event.raw.startsWith('NAK|')) {
+          break;
+        }
+        // the bridge's hello replays recent events on every SSE reconnect;
+        // without dedup a few Wi-Fi blips multiply the incident log
+        if (m.history &&
+            events.any((e) => e.raw == m.event.raw && e.time == m.event.time)) {
+          break;
+        }
+        events.insert(0, m.event);
+        if (events.length > 400) events.removeLast();
+        if (!m.history) {
+          if (m.event.sev == Severity.emerg) {
+            // a NEW kind of emergency re-raises the acked overlay; the same
+            // one re-emitted does not (that was the can't-exit bug)
+            final key = '${m.event.zone}|${m.event.type}';
+            if (key != _ackedEmergKey) emergencyAcked = false;
+            if (DateTime.now().difference(_lastEmergSound).inSeconds >= 10) {
+              _lastEmergSound = DateTime.now();
+              HapticFeedback.heavyImpact();
+              SystemSound.play(SystemSoundType.alert);
+            }
+          } else if (m.event.sev == Severity.alert) {
+            HapticFeedback.mediumImpact();
+            // an intrusion earns the same full-screen treatment as a fire: at
+            // 3AM a toast behind a lock screen is the same as no alarm at all
+            if (m.event.type == 'INTRUDER') {
+              intruderActive = true;
+              SystemSound.play(SystemSoundType.alert);
+            }
+          } else if (m.event.sev == Severity.sec) {
+            lastSec = m.event;
+            HapticFeedback.selectionClick();
+            _secTimer?.cancel();
+            _secTimer = Timer(const Duration(seconds: 6), clearSecToast);
+          }
+        }
+      case AiMsg():
+        risk = m.risk;
+      case AuditMsg():
+        audit = m.log;
+      case ConnMsg():
+        connected = m.connected;
+        connDetail = m.detail;
+    }
+    notifyListeners();
+  }
+
+  void ackIntruder() {
+    intruderActive = false;
+    notifyListeners();
+  }
+
+  void ackEmergency() {
+    emergencyAcked = true;
+    final lastEmerg =
+        events.where((e) => e.sev == Severity.emerg).firstOrNull;
+    _ackedEmergKey =
+        lastEmerg == null ? '' : '${lastEmerg.zone}|${lastEmerg.type}';
+    notifyListeners();
+  }
+
+  void clearSecToast() {
+    lastSec = null;
+    notifyListeners();
+  }
+
+  /// Who is holding the phone. Sent with every command — the BRIDGE enforces
+  /// (403 + SEC event on the wire); the UI only mirrors it by disabling taps.
+  String role = 'admin';
+
+  void setRole(String r) {
+    role = r;
+    _localEvent('SEC|ROLE_SWITCHED|${r.toUpperCase()}', Severity.sec);
+  }
+
+  /// The app is a PIN-guarded client: dangerous taps re-ask the panel PIN in
+  /// the UI (PinDialog), and protected commands carry the panel code so the
+  /// bridge's PIN gate holds against every client that is NOT this app.
+  Future<void> command(String a, {String? pin}) async =>
+      _source?.command(a, role: role, pin: pin ?? _pin.join());
+
+  String get _timeNow {
+    final n = DateTime.now();
+    String p(int x) => x.toString().padLeft(2, '0');
+    return '${p(n.hour)}:${p(n.minute)}:${p(n.second)}';
+  }
+
+  void _localEvent(String raw, Severity sev) {
+    events.insert(0, StrajerEvent(raw, _timeNow, sev));
+    notifyListeners();
+  }
+
+  /// App-side auth layer: disarming needs the user PIN (arming does not).
+  /// PIN mirrors the panel code. 3 misses -> 30 s local lockout.
+  static const _pin = [1, 3, 2, 4];
+
+  /// How long one PIN entry keeps remote control unlocked. A stolen or
+  /// shoulder-surfed phone is only dangerous for this long; after it the next
+  /// actuator tap proves the operator again. Fixed from the moment of entry,
+  /// deliberately NOT slid forward by activity — the window is a bound on
+  /// exposure, not an idle timeout.
+  static const authWindow = Duration(minutes: 10);
+
+  bool get authorized =>
+      _authUntil != null && DateTime.now().isBefore(_authUntil!);
+
+  /// Seconds left on the window, 0 when locked. Drives the Controls header.
+  int get authSecondsLeft {
+    if (_authUntil == null) return 0;
+    final s = _authUntil!.difference(DateTime.now()).inSeconds;
+    return s > 0 ? s : 0;
+  }
+
+  /// True when the local lockout after 3 wrong PINs is still running.
+  bool get pinLockedOut =>
+      pinLockUntil != null && DateTime.now().isBefore(pinLockUntil!);
+
+  /// Shared PIN check. Does not act on its own — callers decide what a
+  /// proven PIN buys (a DISARM, or the remote-control window).
+  PinResult _checkPin(List<int> digits) {
+    if (pinLockedOut) return PinResult.locked;
+    if (digits.length == 4 &&
+        List.generate(4, (i) => digits[i] == _pin[i]).every((x) => x)) {
+      pinFails = 0;
+      pinLockUntil = null;
+      return PinResult.ok;
+    }
+    pinFails++;
+    _localEvent('EVT|0|ctrl|PIN_FAIL|$pinFails|WARN', Severity.warn);
+    if (pinFails >= 3) {
+      pinLockUntil = DateTime.now().add(const Duration(seconds: 30));
+      pinFails = 0;
+      _localEvent('SEC|APP_PIN_LOCKOUT|30s', Severity.sec);
+      return PinResult.locked;
+    }
+    return PinResult.wrong;
+  }
+
+  PinResult tryDisarm(List<int> digits) {
+    final r = _checkPin(digits);
+    if (r == PinResult.ok) {
+      command('DISARM', pin: digits.join()); // the digits the user just proved
+      _localEvent('EVT|0|ctrl|PIN_OK_DISARMED|0|INFO', Severity.info);
+      _openAuthWindow();
+    }
+    return r;
+  }
+
+  /// Prove the PIN to unlock remote actuator control for [authWindow].
+  PinResult authorizeControl(List<int> digits) {
+    final r = _checkPin(digits);
+    if (r == PinResult.ok) {
+      _localEvent('EVT|0|ctrl|PIN_OK_CONTROL|${authWindow.inSeconds}|INFO',
+          Severity.info);
+      _openAuthWindow();
+    }
+    return r;
+  }
+
+  void _openAuthWindow() {
+    _authUntil = DateTime.now().add(authWindow);
+    _authTicker?.cancel();
+    // one tick a second so the header counts down and re-locks on its own,
+    // without every widget polling the clock
+    _authTicker = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!authorized) {
+        t.cancel();
+        _authTicker = null;
+        _authUntil = null;
+        _localEvent('SEC|CONTROL_RELOCKED|${authWindow.inSeconds}s', Severity.sec);
+      }
+      notifyListeners();
+    });
+    notifyListeners();
+  }
+
+  /// Close the window by hand — the "Lock now" affordance.
+  void lockControl() {
+    if (_authUntil == null) return;
+    _authTicker?.cancel();
+    _authTicker = null;
+    _authUntil = null;
+    _localEvent('SEC|CONTROL_LOCKED|manual', Severity.sec);
+    notifyListeners();
+  }
+
+  /// Demo director: one tap = one rehearsed pitch scene, correct timing.
+  /// Works identically in Demo and Live mode (routes through the source).
+  Future<void> runScene(int n) async {
+    if (sceneRunning) return;
+    sceneRunning = true;
+    notifyListeners();
+    final ep = _epoch; // switching Demo↔Live mid-scene must abort the scene,
+    // not retarget its remaining SIM injections at the other source
+    Future<void> wait(int s) async {
+      await Future.delayed(Duration(seconds: s));
+      if (ep != _epoch) throw _SceneAborted();
+    }
+    try {
+      switch (n) {
+        case 1: // central control: mode round-trip
+          await command('ARM');
+          await wait(3);
+          await command('DISARM');
+          await wait(2);
+          await command('VENT');
+        case 2: // energy: ammonia rise -> auto ventilation -> recover
+          await simulate('nh3', 32);
+          await wait(6);
+          await simulate('nh3', 8);
+          await wait(3);
+          await command('FAN_OFF');
+        case 3: // security: night watch -> intruder
+          await command('ARM');
+          await wait(2);
+          await simulate('mot', 1);
+          await wait(4);
+          await simulate('mot', 0);
+        case 4: // life safety + cyber: gas emergency -> recover -> attack -> audit
+          for (final v in [300, 500, 750, 900]) {
+            await simulate('gas', v);
+            await wait(2);
+          }
+          await wait(4);
+          for (final v in [500, 300, 150]) {
+            await simulate('gas', v);
+            await wait(2);
+          }
+          await replayAttack();
+          await wait(2);
+          await command('DUMPLOG');
+      }
+    } on _SceneAborted {
+      // source switched mid-scene — stop cleanly, inject nothing further
+    } finally {
+      sceneRunning = false;
+      notifyListeners();
+    }
+  }
+  Future<void> simulate(String n, num v) async => _source?.simulate(n, v);
+  Future<void> replayAttack() async => _source?.replayAttack();
+
+  @override
+  void dispose() {
+    _secTimer?.cancel();
+    _authTicker?.cancel();
+    _sub?.cancel();
+    _source?.dispose();
+    super.dispose();
+  }
+}
+
+class StrajerApp extends StatelessWidget {
+  const StrajerApp({super.key});
+  @override
+  Widget build(BuildContext context) => ChangeNotifierProvider(
+        create: (_) => AppState(),
+        child: MaterialApp(
+          title: 'BioGuard',
+          debugShowCheckedModeBanner: false,
+          theme: T.theme(),
+          home: const BootGate(child: Shell()),
+        ),
+      );
+}
+
+class Shell extends StatefulWidget {
+  const Shell({super.key});
+  @override
+  State<Shell> createState() => _ShellState();
+}
+
+class _ShellState extends State<Shell> {
+  int _tab = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    final app = context.watch<AppState>();
+    final emergencyActive =
+        app.mode == FarmMode.emergency && !app.emergencyAcked;
+    return Stack(children: [
+      Scaffold(
+        body: IndexedStack(index: _tab, children: const [
+          HomeScreen(),
+          ControlsScreen(),
+          EventsScreen(),
+          ForecastScreen(),
+          FleetScreen(),
+        ]),
+        bottomNavigationBar: NavigationBar(
+          selectedIndex: _tab,
+          onDestinationSelected: (i) => setState(() => _tab = i),
+          backgroundColor: T.surface,
+          indicatorColor: T.surface2,
+          height: 64,
+          destinations: const [
+            NavigationDestination(icon: Icon(Icons.grid_view_rounded), label: 'Farm'),
+            NavigationDestination(icon: Icon(Icons.tune_rounded), label: 'Controls'),
+            NavigationDestination(icon: Icon(Icons.query_stats_rounded), label: 'Activity'),
+            NavigationDestination(icon: Icon(Icons.online_prediction_rounded), label: 'Forecast'),
+            NavigationDestination(icon: Icon(Icons.cloud_outlined), label: 'Fleet'),
+          ],
+        ),
+      ),
+      if (emergencyActive) const EmergencyOverlay(),
+      // a gas/fire emergency outranks an intrusion — never stack the two
+      if (!emergencyActive && app.intruderActive) const IntruderOverlay(),
+      if (app.lastSec != null) SecToast(event: app.lastSec!),
+    ]);
+  }
+}
+
+enum PinResult { ok, wrong, locked }
+
+class _SceneAborted implements Exception {}
