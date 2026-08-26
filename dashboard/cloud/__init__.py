@@ -26,11 +26,19 @@ from .store import FirestoreStore, LocalStore
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_LOCAL = os.path.join(_HERE, "..", "cloud_local.json")
+# Where the key normally lives. Checked when BIOGUARD_FIREBASE_KEY is unset,
+# because "forgot to export the env var" must not be a way to walk on stage
+# with the console quietly reading LOCAL.
+DEFAULT_KEY = os.path.expanduser("~/.bioguard/service-account.json")
 
 
 class Config:
     def __init__(self):
         self.key_path = os.environ.get("BIOGUARD_FIREBASE_KEY", "").strip()
+        self.key_from_default = False
+        if not self.key_path and os.path.exists(DEFAULT_KEY):
+            self.key_path = DEFAULT_KEY
+            self.key_from_default = True
         self.project_id = os.environ.get("BIOGUARD_PROJECT_ID", "").strip()
         self.farm_id = os.environ.get("BIOGUARD_FARM_ID", "strajer-01").strip()
         self.mode = os.environ.get("BIOGUARD_CLOUD", "auto").strip().lower()
@@ -64,7 +72,8 @@ def open_store(force: bool = False):
                 s.cred.token()          # fail fast on a bad key, not mid-demo
                 _store = s
                 _status.update(backend="firestore", project=s.project_id,
-                               detail="connected")
+                               detail="connected" + (" (default key)"
+                                       if CFG.key_from_default else ""))
                 return _store
             except Exception as e:
                 _status.update(backend="local", project="local-offline",

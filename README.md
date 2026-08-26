@@ -123,10 +123,21 @@ Firestore rules are still Google's test-mode default: **world read+write until 2
 Fine for the hackathon, but if a judge asks about the cloud's security posture, the honest
 answer is that device→cloud writes are service-account authenticated while client reads are
 currently open, and the fix is a one-line rule change to `allow read: if true; allow write: if false;`.
-The Flutter **Fleet** tab reads Firestore *directly* (paste the web config into
+The Flutter **Fleet** tab reads Firestore *directly* (config already wired in
 `lib/firebase_options.dart`), so on a phone over mobile data it needs no laptop in the loop;
 if Firebase can't initialise it transparently falls back to the bridge's `/cloud/api/fleet`,
-which serves the identical shape.
+which serves the identical shape. The header always states which one it used — *"via
+Firestore"* vs *"via Bridge"* plus the reason — so a silent fallback can never be mistaken
+for the real thing on stage.
+
+⚠️ **Two build traps, both cost us time once:**
+1. Always `--base-href /app/`. A plain `flutter build web` resets it to `/` and the app
+   serves blank at `/app/`.
+2. After adding any plugin, `flutter clean` before building. The cached
+   `web_plugin_registrant.dart` does **not** regenerate on its own, so `firebase_core`
+   silently never registers and every `Firebase.initializeApp()` dies with
+   `channel-error … FirebaseCoreHostApi.initializeCore` — which looks like bad config but
+   is a stale build.
 
 ## Firmware test bench — how we test Oleksandr's firmware (Tue/Wed)
 `dashboard/app.py` doubles as the test bench. With the UNO plugged into the laptop:

@@ -19,7 +19,7 @@ Open http://localhost:5001   (0.0.0.0 binding is default so the phone can join)
 
 Deps:  pip install flask pyserial
 """
-import argparse, glob, json, queue, random, threading, time
+import argparse, glob, hashlib, hmac, json, os, queue, random, threading, time
 from collections import deque
 from flask import Flask, Response, request
 
@@ -42,17 +42,15 @@ except Exception as _e:                                   # noqa: BLE001
         def snapshot(self): return {"error": str(_e)}
     CLOUD_SINK = _NoCloud()
 
-SECRET = b"STRAJER26"          # must match SECRET in the firmware
+SECRET = b"STRAJER26"          # must match SECRET in the device node
 
-def crc8(data: bytes, crc: int = 0) -> int:
-    for b in data:
-        crc ^= b
-        for _ in range(8):
-            crc = ((crc << 1) ^ 0x31) & 0xFF if crc & 0x80 else (crc << 1) & 0xFF
-    return crc
-
-def mac_for(counter: int, action: str) -> int:
-    return crc8(SECRET, crc8(f"{counter}|{action}".encode()))
+# Command auth: truncated HMAC-SHA256 (stdlib on both ends — the Pi node too).
+# The 1-byte CRC8 MAC was an Arduino-RAM compromise and died with the Uno; a
+# keyed hash survives known-plaintext, which a CRC of a shared secret does not.
+# 32 bits of tag is ample for a point-to-point link where the monotonic
+# counter already kills replays.
+def mac_for(counter: int, action: str) -> str:
+    return hmac.new(SECRET, f"{counter}|{action}".encode(), hashlib.sha256).hexdigest()[:8]
 
 LOG_TYPES = {1:"BOOT",2:"MODE",3:"GAS",4:"INTRUDER",5:"TAMPER",
              6:"PIN_FAIL",7:"LOCKDOWN",8:"CMD_REJECT",9:"DISARM"}
@@ -75,8 +73,8 @@ PIN_CODE = "1324"                    # mirrors the panel keypad code 1-3-2-4
 ROLE_RANK = {"viewer":0, "operator":1, "admin":2}
 security = {"pin_fails":0, "lockdown":False}
 
-def fw_sig(ver: str) -> int:
-    return crc8(SECRET, crc8(ver.encode()))
+def fw_sig(ver: str) -> str:
+    return hmac.new(SECRET, ver.encode(), hashlib.sha256).hexdigest()[:8]
 
 def sec_event(line: str):
     handle_line(f"SEC|{line}")
@@ -285,6 +283,27 @@ def script_nh3_drift():
     time.sleep(30)          # plateau: threshold silent, PREDICT lapses, DRIFT holds
     send_raw("SIM|nh3=8")
 
+def script_nist_smoulder():
+    """REAL DATA: NIST FR 4019 test MHN40 (smoldering PU foam, TN 1455-1).
+    14.5 min of the instrumented test replayed at 10x, one 10-s bucket per
+    demo second. The point: temperature never leaves 24-31 C, so a heat-only
+    alarm sleeps through the entire event — the gas channel is what climbs,
+    the analyst forecasts the crossing, and the reflex trips only on the
+    test's real peak (176 mg/m3 at minute 13). t1/hum replay the NIST columns
+    unscaled; gas counts = 120 + smoke_mg_m3 * 3.4 — shape and timing are
+    NIST's, amplitude scaled onto the MQ demo range (metadata in the json)."""
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "nist_mhn40.json")) as fh:
+        samples = json.load(fh)["samples"]
+    for _t, temp, rh, smoke in samples:
+        send_raw(f"SIM|t1={temp:.1f}")
+        send_raw(f"SIM|hum={rh:.0f}")
+        send_raw(f"SIM|gas={min(1023.0, 120 + smoke * 3.4):.0f}")
+        time.sleep(1.0)
+    time.sleep(4)
+    for k, v in (("gas", 120), ("t1", 24), ("hum", 55)):
+        send_raw(f"SIM|{k}={v}")
+
 def script_fw_signed():
     ver = "1.4"
     send_raw(f"FW|{ver}|{fw_sig(ver)}")
@@ -295,6 +314,7 @@ def script_fw_unsigned():
 SCRIPTS = {"gas_ramp":script_gas_ramp, "replay":script_replay,
            "night_intruder":script_night_intruder, "flame":script_flame,
            "slow_creep":script_slow_creep, "nh3_drift":script_nh3_drift,
+           "nist_smoulder":script_nist_smoulder,
            "fw_signed":script_fw_signed, "fw_unsigned":script_fw_unsigned}
 
 # ── fake-data generator ──────────────────────────────────────────────────
@@ -309,7 +329,7 @@ def fake_rx(s: str):
         # signed-update demo: device only flashes an image whose signature
         # verifies against the shared secret (same primitive as the CMD MAC)
         _, ver, sig = s.split("|")
-        if int(sig) == fw_sig(ver):
+        if sig == fw_sig(ver):
             fake["fw"] = ver
             handle_line(f"EVT|0|ctrl|FW_VERIFIED|v{ver}|INFO")
         else:
@@ -320,7 +340,7 @@ def fake_rx(s: str):
         ctr = int(ctr)
         if ctr <= fake["ctr"]:
             handle_line("SEC|REPLAY_REJECTED|STALE_COUNTER"); return
-        if int(mac) != mac_for(ctr, action):
+        if mac != mac_for(ctr, action):
             handle_line("SEC|CMD_REJECTED|BAD_MAC"); return
         fake["ctr"] = ctr
         if fake["mode"] == "LOCKDOWN" and action != "FAN_ON":
@@ -365,7 +385,9 @@ def fake_loop():
         # made our own tier-2 analyst flag our own dispatch as "sensor fault or
         # spoofed input" -- the thermal channel is what corroborates the flame
         # pin, so it has to actually move.
-        if f["flame"]:
+        if "t1" in f["sim"]:
+            pass                      # a SIM-pinned probe (NIST replay) is authoritative
+        elif f["flame"]:
             f["t1"] = min(64.0, float(f["t1"]) + random.uniform(1.2, 2.0))
         elif float(f["t1"]) > 25.5:
             f["t1"] = max(24.0, float(f["t1"]) - random.uniform(0.8, 1.4))
@@ -444,6 +466,7 @@ class Analyst:
         self.learning = True
         self.fan_since = None
         self._emitted = {}
+        self._risk_level = "LOW"
 
     def relearn(self):
         """Re-learn what 'normal' looks like from now (venue calibration)."""
@@ -519,6 +542,16 @@ class Analyst:
         for kind, zone, what, msg, sev in out:
             self.findings.append({"t": now_t(), "kind": kind, "sev": sev, "msg": msg})
             handle_line(f"AI|{kind}|{zone}|{what}|{msg}|{sev}")
+
+        # fused farm-level risk — emitted only when the LEVEL changes, so the
+        # feed gets "risk ELEVATED/HIGH/back to LOW" beats, not a ticker
+        risk = self._risk()
+        if not self.learning and risk["level"] != self._risk_level:
+            self._risk_level = risk["level"]
+            top = risk["drivers"][0]["detail"] if risk["drivers"] else "all channels nominal"
+            msg = f"farm risk {risk['level']} ({int(risk['score']*100)}%) — {top}"
+            self.findings.append({"t": now_t(), "kind": "RISK", "sev": risk["sev"], "msg": msg})
+            handle_line(f"AI|RISK|farm|{risk['level']}|{msg}|{risk['sev']}")
         publish({"type": "ai", "ai": self.snapshot()})
 
     def _freeze_baseline(self):
@@ -627,6 +660,75 @@ class Analyst:
                                 f"check the fan belt or the inlet", "ALERT"))
         return out
 
+    # ── fused farm-level risk ────────────────────────────────────────────
+    # quiet-farm anchors used until the baseline is learned; after learning,
+    # the learned mu replaces them (venue self-calibration)
+    RISK_NORM = {"gas": 120.0, "nh3": 8.0, "t1": 24.0, "t2": 24.0}
+    RISK_W    = {"gas": 1.0, "nh3": 0.85, "t1": 0.9, "t2": 0.5,
+                 "hum": 0.35, "water": 0.4}
+
+    def _risk(self):
+        """One explainable 0-1 number for the whole farm (Vivi's multi-sensor
+        score, grounded in the analyst's state). Per channel take the
+        strongest of proximity-to-critical, forecast imminence and baseline
+        deviation, then noisy-OR the weighted contributions so several
+        mildly-bad channels outrank a single one. Flame or an active
+        EMERGENCY pins the score — the reflex layer already decided and the
+        advisory number must not argue with it."""
+        drivers, acc, soonest = [], 1.0, None
+        for k, (zone, label, unit, limit) in AI_CHANNELS.items():
+            st = self.ch.get(k)
+            if not st or st["s"] is None:
+                continue
+            anchor = st["mu"] if st["mu"] is not None else self.RISK_NORM.get(k)
+            prox = imm = dev = 0.0
+            if limit is not None and anchor is not None and limit > anchor:
+                prox = max(0.0, min(1.0, (st["s"] - anchor) / (limit - anchor)))
+            eta = None
+            if limit and st["slope"] > 0 and st["s"] < limit and st["n"] >= self.MIN_N:
+                e = (limit - st["s"]) / st["slope"]
+                if 0 < e <= 3600:
+                    eta = e
+                    imm = max(0.0, min(1.0, 1.0 - e / 600.0))
+            if st["mu"] is not None:
+                dev = max(0.0, min(1.0, (abs(st["s"] - st["mu"]) / st["sd"] - 2.0) / 6.0))
+            c = max(prox, imm, 0.7 * dev)
+            if c < 0.05:
+                continue
+            if eta is not None and (soonest is None or eta < soonest[0]):
+                soonest = (eta, label)
+            if imm >= prox and imm >= 0.7 * dev and eta is not None:
+                detail = f"{label} rising — critical in {fmt_eta(eta)}"
+            elif prox >= 0.7 * dev:
+                detail = f"{label} at {int(round(100 * prox))}% of the span to critical"
+            else:
+                detail = f"{label} {(st['s'] - st['mu']) / st['sd']:+.1f}σ off its learned normal"
+            drivers.append({"k": k, "label": label, "zone": zone,
+                            "pct": int(round(100 * c)), "detail": detail})
+            acc *= 1.0 - self.RISK_W.get(k, 0.5) * c
+        score = 1.0 - acc
+        flame = state.get("tel", {}).get("flame", {}).get("v", 0)
+        if state.get("mode") == "EMERGENCY" or flame >= 1:
+            score = max(score, 0.95)
+            drivers.insert(0, {"k": "reflex", "label": "reflex", "zone": "farm", "pct": 100,
+                               "detail": "reflex layer engaged — emergency mitigation running"})
+        drivers.sort(key=lambda d: -d["pct"])
+        level, sev = (("HIGH", "ALERT") if score >= 0.7 else
+                      ("ELEVATED", "WARN") if score >= 0.4 else ("LOW", "INFO"))
+        top = drivers[0]["k"] if drivers else None
+        action = {"gas": "ventilate the pit and check for a combustion source",
+                  "nh3": "increase hall ventilation",
+                  "t1": "start cooling and check the heat source",
+                  "t2": "start cooling and check the heat source",
+                  "hum": "check ventilation and the water lines",
+                  "water": "check the water supply",
+                  "reflex": "follow the emergency card — the reflex layer is acting",
+                  }.get(top, "monitor — no action needed")
+        return {"score": round(min(1.0, score), 2), "level": level, "sev": sev,
+                "eta": fmt_eta(soonest[0]) if soonest else None,
+                "eta_label": soonest[1] if soonest else None,
+                "action": action, "drivers": drivers[:3]}
+
     # ── snapshot for the live UI panel ───────────────────────────────────
     def snapshot(self):
         chans = []
@@ -656,6 +758,7 @@ class Analyst:
             prog = min(1.0, (time.time() - self.t0) / self.baseline_secs)
         return {"learning": self.learning, "learned_at": self.learned_at,
                 "progress": round(prog, 2), "baseline_secs": int(self.baseline_secs),
+                "risk": self._risk(),
                 "channels": chans, "findings": list(self.findings)}
 
 analyst = Analyst()
@@ -942,7 +1045,8 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
    <button onclick="script('night_intruder')">ARM + INTRUDER</button>
    <button onclick="script('flame')">FLAME 5s</button><br>
    <button class="acc" onclick="script('slow_creep')">AI · SLOW GAS CREEP (predicted ~60s early)</button>
-   <button class="acc" onclick="script('nh3_drift')">AI · NH3 DRIFT (never crosses the limit)</button>
+   <button class="acc" onclick="script('nh3_drift')">AI · NH3 DRIFT (never crosses the limit)</button><br>
+   <button class="acc" onclick="script('nist_smoulder')">REAL DATA · NIST SMOULDER FR-4019 (10×)</button>
    <button onclick="cmd('DUMPLOG')">AUDIT DUMP</button><br>
    <button class="acc" onclick="script('fw_signed')">FW UPDATE v1.4 (signed)</button>
    <button class="red" onclick="script('fw_unsigned')">FW UPDATE (unsigned — attack)</button>
@@ -990,6 +1094,7 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
  <div class="card" style="flex:2">
   <div class="dim">AI ANALYST <span class="aitag">TIER 2</span> — predictive layer.
    <b>Advisory only: it never actuates.</b> Every command still goes through CMD|ctr|mac|ACTION.</div>
+  <div id="airisk" style="margin:6px 0 2px;font-size:14px"></div>
   <div id="aibase" class="dim" style="margin:6px 0">waiting for telemetry…</div>
   <table id="aitab"></table>
  </div>
@@ -1042,6 +1147,11 @@ function onTel(t){
  el('z-ctrl').className='zone'+(t.tamp&&t.tamp.v?' alert':'');
 }
 function onAi(a){
+ const r=a.risk;
+ if(r){const col=r.level=='HIGH'?'var(--alert)':r.level=='ELEVATED'?'var(--warn)':'var(--ok)';
+  el('airisk').innerHTML=`farm risk <b style="color:${col}">${r.level}</b> (${Math.round(r.score*100)}%)`+
+   (r.eta?` — earliest critical: <b>${r.eta_label} in ${r.eta}</b>`:'')+
+   ` · <span class=dim>${r.action}</span>`;}
  const b=el('aibase');
  if(a.learning){const p=Math.round(a.progress*100);
   b.innerHTML=`<b>learning what "normal" looks like in this room</b> — ${p}% of ${a.baseline_secs}s`;

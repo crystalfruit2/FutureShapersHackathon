@@ -312,7 +312,7 @@ class Shell extends StatefulWidget {
 }
 
 class _ShellState extends State<Shell> {
-  int _tab = 4; // TEMP-SCREENSHOT
+  int _tab = 0;
 
   @override
   Widget build(BuildContext context) {

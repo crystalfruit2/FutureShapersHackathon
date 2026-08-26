@@ -64,8 +64,23 @@ def _farm_view(store, farm: dict, model, deep: bool = False):
         risk = round(100 * model.predict(x), 1)
         drivers = model.explain(x)
 
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)) \
-        .strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Anchor "last 24 h" to the newest data this farm actually has, not to the
+    # wall clock. For the live node they are the same thing. For seeded
+    # history they are not: seed on Tuesday afternoon, present on Wednesday
+    # morning, and a wall-clock window silently slides past the whole episode
+    # — the regional biosecurity banner would vanish mid-pitch with nothing
+    # broken and nothing to debug. This reads as "the last 24 h on record",
+    # which is what the number was always meant to mean.
+    stamps = [str(e.get("ts", "")) for e in events] + \
+             [str(s_.get("ts", "")) for s_ in hist]
+    latest = max([x for x in stamps if x] or
+                 [datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")])
+    try:
+        ref = datetime.strptime(latest, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc)
+    except ValueError:
+        ref = datetime.now(timezone.utc)
+    cutoff = (ref - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
     recent = [e for e in events if str(e.get("ts", "")) >= cutoff]
     markers = sorted({e.get("type", "") for e in recent
                       if e.get("type") in MARKER_TYPES})

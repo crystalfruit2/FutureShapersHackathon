@@ -24,10 +24,12 @@ Protocol (newline-terminated, one line each way):
   up:   TEL|k=v,...   EVT|slot|zone|WHAT|val|SEV   STATE|MODE
         SEC|...       ACK|ctr    LOG|slot|type|val|min|chain    LOG|END
   down: CMD|counter|mac|ACTION   SIM|key=val   FW|version|signature
-Security: every CMD carries crc8(SECRET, crc8("counter|action")) and a
-monotonic counter — replays and forged MACs are rejected ON THIS DEVICE.
+Security: every CMD carries a truncated HMAC-SHA256 over "counter|action"
+(keyed with the shared secret) plus a monotonic counter — replays and forged
+MACs are rejected ON THIS DEVICE. The audit log stays CRC8-chained (tamper
+evidence, not authentication — same scheme the EEPROM story sells).
 """
-import random, socket, threading, time
+import hashlib, hmac, random, socket, threading, time
 
 SECRET = b"STRAJER26"        # must match the bridge
 PORT   = 7777
@@ -66,10 +68,11 @@ def crc8(data, crc=0):
     return crc
 
 def mac_for(counter, action):
-    return crc8(SECRET, crc8(f"{counter}|{action}".encode()))
+    # truncated HMAC-SHA256, hex — must match the bridge byte-for-byte
+    return hmac.new(SECRET, f"{counter}|{action}".encode(), hashlib.sha256).hexdigest()[:8]
 
 def fw_sig(ver):
-    return crc8(SECRET, crc8(ver.encode()))
+    return hmac.new(SECRET, ver.encode(), hashlib.sha256).hexdigest()[:8]
 
 READERS = {"gas":read_gas, "nh3":read_nh3, "flame":read_flame, "t1":read_t1,
            "t2":read_t2, "hum":read_hum, "water":read_water, "mot":read_mot,
@@ -175,7 +178,7 @@ def handle_line(line):
     try:
         if line.startswith("CMD|"):
             _, ctr, mac, action = line.split("|")
-            with lock: handle_cmd(int(ctr), int(mac), action)
+            with lock: handle_cmd(int(ctr), mac, action)
         elif line.startswith("SIM|"):
             k, v = line[4:].split("=")
             with lock:
@@ -184,7 +187,7 @@ def handle_line(line):
             _, ver, sig = line.split("|")
             with lock:
                 global fw_version
-                if int(sig) == fw_sig(ver):
+                if sig == fw_sig(ver):
                     fw_version = ver
                     evt("ctrl", "FW_VERIFIED", f"v{ver}", "INFO")
                 else:

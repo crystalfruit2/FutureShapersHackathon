@@ -7,3 +7,6 @@ __pycache__/
 attract/frames/
 attract/co_frames/
 attract/shots/
+
+# generated demo fleet (regenerate: python3 -m cloud.seed --days 30)
+dashboard/cloud_local.json
