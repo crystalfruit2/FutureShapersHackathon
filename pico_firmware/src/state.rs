@@ -46,7 +46,7 @@ pub async fn buzzer_alert(mut pin: Output<'static>) {
     loop {
         match state {
             State::Idle => {
-                // TODO
+                pin.set_low();
             },
             State::Warning => {
                 // TODO

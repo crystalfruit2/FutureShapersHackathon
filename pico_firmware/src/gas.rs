@@ -34,6 +34,9 @@ pub async fn read_gas_water(
         if gas_level > GAS_ALERT_THRESHOLD {
             tx.send(State::Alert(AlertType::Gas));
         }
+        else {
+            tx.send(State::Idle);
+        }
 
         if water_level < WATER_ALERT_THRESHOLD {
             tx.send(State::Alert(AlertType::WaterLevel));
