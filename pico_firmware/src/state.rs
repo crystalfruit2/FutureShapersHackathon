@@ -52,10 +52,12 @@ pub async fn buzzer_alert(mut pin: Output<'static>) {
             }
             State::Alert(_) => {
                 let buzzer_future = async {
-                    pin.set_high();
-                    Timer::after_millis(BUZZER_TIMEOUT_MS).await;
-                    pin.set_low();
-                    Timer::after_millis(BUZZER_TIMEOUT_MS).await;
+                    loop {
+                        pin.set_high();
+                        Timer::after_millis(BUZZER_TIMEOUT_MS).await;
+                        pin.set_low();
+                        Timer::after_millis(BUZZER_TIMEOUT_MS).await;
+                    }
                 };
                 match select(buzzer_future, rx.changed()).await {
                     Either::First(_) => unreachable!(),
