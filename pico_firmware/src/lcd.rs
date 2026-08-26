@@ -27,7 +27,7 @@ enum DisplayLine {
 }
 
 enum DisplayPhase {
-    Gas, Temperature, Humidity
+    Gas, Temperature, Humidity, WaterLevel
 }
 
 async fn clean_line(
@@ -114,6 +114,25 @@ async fn display_humidity(
     }
 }
 
+async fn display_water_level(
+    lcd: &mut HD44780<I2CBus<I2c<'static, I2C0, Async>>>,
+    delay: &mut Delay
+) {
+    write_line(DisplayLine::Top, "Water Level:", lcd, delay).await;
+    let level = {
+        let t = TELEMETRY.lock().await;
+        t.water_level
+    };
+
+    if level.is_none() {
+        write_line(DisplayLine::Bottom, "---", lcd, delay).await;
+    } else {
+        let mut string: String<32> = String::new();
+        write!(string, "{}", level.unwrap()).unwrap();
+        write_line(DisplayLine::Bottom, string.as_str(), lcd, delay).await;
+    }
+}
+
 #[embassy_executor::task]
 pub async fn display_task(i2c: I2c<'static, I2C0, Async>) {
     // initial setup
@@ -147,9 +166,12 @@ pub async fn display_task(i2c: I2c<'static, I2C0, Async>) {
                     },
                     AlertType::Temperature => {
                         write_line(DisplayLine::Bottom, "Temperature danger", &mut lcd, &mut delay).await;
-                    }
+                    },
                     AlertType::Humidity => {
                         write_line(DisplayLine::Bottom, "Humidity level danger", &mut lcd, &mut delay).await;
+                    },
+                    AlertType::WaterLevel => {
+                        write_line(DisplayLine::Bottom, "Low water level", &mut lcd, &mut delay).await;
                     }
                 }
                 rx.changed().await;
@@ -168,6 +190,10 @@ pub async fn display_task(i2c: I2c<'static, I2C0, Async>) {
             }
             DisplayPhase::Humidity => {
                 display_humidity(&mut lcd, &mut delay).await;
+                phase = DisplayPhase::WaterLevel;
+            },
+            DisplayPhase::WaterLevel => {
+                display_water_level(&mut lcd, &mut delay).await;
                 phase = DisplayPhase::Gas;
             }
         }
