@@ -34,7 +34,7 @@ class AppState extends ChangeNotifier {
   bool connected = false;
   String connDetail = 'Starting…';
   bool usingBridge = false;
-  String bridgeUrl = 'http://192.168.4.9:5001';  // laptop's static IP on the board/Pi AP
+  String bridgeUrl = 'http://192.168.4.2:5001';  // laptop's static IP on the board/Pi AP
   bool emergencyAcked = false;
   bool intruderActive = false; // full-screen intrusion takeover pending ack
   bool sceneRunning = false;
