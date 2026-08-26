@@ -4,6 +4,7 @@ use embassy_sync::mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
 
 use defmt::info;
+use embassy_time::Timer;
 
 #[derive(Clone, Debug, defmt::Format)]
 pub struct Telemetry {
@@ -34,5 +35,6 @@ pub async fn gather() {
             t.clone()
         };
         info!("Telemetry gathered: {}", t);
+        Timer::after_secs(1).await;
     }
 }

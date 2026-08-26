@@ -31,7 +31,7 @@ async fn main(spawner: Spawner) {
     info!("Hello world!");
 
     // Buzzer alert setup
-    let buzzer = Output::new(p.PIN_2, Level::Low);
+    let buzzer = Output::new(p.PIN_2, Level::High);
     spawner.spawn(state::buzzer_alert(buzzer).unwrap());
 
     // Status LED setup

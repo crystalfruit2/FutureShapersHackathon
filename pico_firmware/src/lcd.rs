@@ -31,10 +31,11 @@ async fn clean_line(
     delay: &mut Delay
 ) {
     match line {
-        DisplayLine::Top => lcd.set_cursor_pos(0, delay).unwrap(), // move to the first line
-        DisplayLine::Bottom => lcd.set_cursor_pos(40, delay).unwrap(), // move to the second line
+        DisplayLine::Top => { let _ = lcd.set_cursor_pos(0, delay); },
+        // Notice I changed 40 to 0x40 below! See Bonus Bug 1.
+        DisplayLine::Bottom => { let _ = lcd.set_cursor_pos(0x40, delay); },
     }
-    lcd.write_str(EMPTY_LINE, delay).unwrap();
+    let _ = lcd.write_str(EMPTY_LINE, delay);
 }
 
 async fn write_line(
@@ -45,10 +46,10 @@ async fn write_line(
 ) {
     clean_line(line, lcd, delay).await;
     match line {
-        DisplayLine::Top => lcd.set_cursor_pos(0, delay).unwrap(), // move to the first line
-        DisplayLine::Bottom => lcd.set_cursor_pos(40, delay).unwrap(), // move to the second line
+        DisplayLine::Top => { let _ = lcd.set_cursor_pos(0, delay); },
+        DisplayLine::Bottom => { let _ = lcd.set_cursor_pos(0x40, delay); },
     }
-    lcd.write_str(text, delay).unwrap();
+    let _ = lcd.write_str(text, delay);
 }
 
 async fn display_gas(
