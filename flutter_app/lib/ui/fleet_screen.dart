@@ -98,6 +98,10 @@ class _FleetScreenState extends State<FleetScreen> {
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text('Fleet', style: Theme.of(context).textTheme.headlineMedium),
               const SizedBox(height: 2),
+              // Always say HOW we connected, not just when loading failed.
+              // On stage this is the difference between "the app reads the
+              // cloud" and the audience taking that on trust; in development
+              // it is the only visible clue that Firestore fell back.
               Text(
                 s == null
                     ? FleetService.initDetail
@@ -105,6 +109,11 @@ class _FleetScreenState extends State<FleetScreen> {
                         '${_n(s.animals)} animals',
                 style: Theme.of(context).textTheme.bodySmall,
               ),
+              if (s != null && s.source != 'Firestore') ...[
+                const SizedBox(height: 2),
+                Text(FleetService.initDetail,
+                    style: const TextStyle(fontSize: 11, color: T.warn)),
+              ],
             ]),
           ),
           IconButton(

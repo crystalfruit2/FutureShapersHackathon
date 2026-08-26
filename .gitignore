@@ -4,3 +4,6 @@
 */.vscode/launch.json
 */.vscode/ipch
 __pycache__/
+attract/frames/
+attract/co_frames/
+attract/shots/

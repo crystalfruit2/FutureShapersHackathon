@@ -26,15 +26,37 @@ from render import (C, W, H, WW, WH, FPS, BARN, HOUSE, blit, glow, ease,
 # Locked camera. It never moves in either cut -- in a room where every other
 # reel is cuts and pushes, a frame that refuses to move is the loudest thing on
 # the projector. zoom stays at 1.0: anything below it downsamples pixel art.
-CAM = (400, 110, 1.0)
+CAM = (390, 110, 1.0)   # barn framing; the mascot's post sits at the left edge
 BX, BY = BARN
 FIRE_X, FIRE_Y = BX + 50, BY + 72        # feed & water store, right of the doors
 
-C2 = dict(C)
-C2.update({
+# render.sprite() resolves colour keys against render's own palette, so the new
+# names have to live there, not in a local copy
+C.update({
  'ember':(150,38,18),'ember2':(206,66,22),'smoke':(58,60,68),'smoke2':(78,80,88),
  'char':(28,22,20),'ash':(96,92,90),
+ 'trk':(196,42,38),'trk2':(150,28,26),'gls':(120,150,178),'wh':(236,240,244),
+ 'tyre':(44,40,42),'blu':(86,160,255),
 })
+C2 = C
+
+TRUCK = R.sprite([
+ "........KKKKKKKKKKKKKKKKKKKKKKKKKK",
+ ".......KKwwwwwwwwwwwwwwwwwwwwwwwKK",
+ "....KKKKRRRRRKKKKKKKKKKKKKKKKKKKKK",
+ "...KKRRRRRRRKgggggggKRRRRRRRRRRRRK",
+ "..KRRRRRRRRRKgggggggKRwwwwwwwwwwRK",
+ "..KRRRRRRRRRKgggggggKRwwwwwwwwwwRK",
+ "..KRRRRRRRRRRRRRRRRRRRwwwwwwwwwwRK",
+ "..KRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRK",
+ "..KRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRK",
+ "..KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK",
+ ".....KKKK..............KKKK.......",
+ "....KKttKK............KKttKK......",
+ "....KttttK............KttttK......",
+ "....KKttKK............KKttKK......",
+ ".....KKKK..............KKKK.......",
+], {'K':'K','R':'trk','r':'trk2','g':'gls','w':'wh','t':'tyre'})
 
 # ── fire ─────────────────────────────────────────────────────────────────
 def draw_fire(img, amt, t, ox=FIRE_X, oy=FIRE_Y):
@@ -149,7 +171,8 @@ def draw_spark(img, t, ox=FIRE_X, oy=FIRE_Y - 16):
 
 def scene(t, *, house_lit=False, fire=0.0, burn=0.0, barn_open=0.0,
           farmer_x=None, alert=0.0, animals_out=0.0, spark=False,
-          loft_lit=False):
+          loft_lit=False, beetle=True, label=False, door_open=0.0,
+          truck_x=None, phone=0.0):
     """One 640x200 world frame. Modelled on render.draw_world but with the
     states the cold open needs: a dark house, a fire, a burning barn, and the
     node's red reflex."""
@@ -165,6 +188,12 @@ def scene(t, *, house_lit=False, fire=0.0, burn=0.0, barn_open=0.0,
     if not house_lit:                       # nobody is awake. that is the argument.
         Rr(hx + 9, hy + 26, hx + 20, hy + 36, C['wd'])
         Rr(hx + 14, hy + 26, hx + 15, hy + 36, C['wd2'])
+    Rr(hx + 36, hy + 30, hx + 48, hy + 46, C['roof'])
+    dw = int(11 * door_open)
+    if dw > 0:
+        Rr(hx + 36, hy + 30, hx + 36 + dw, hy + 46, C['lit'])
+        if dw >= 3: Rr(hx + 37, hy + 31, hx + 35 + dw, hy + 45, C['lit2'])
+        Rr(hx + 36 + dw, hy + 30, hx + 37 + dw, hy + 46, C['wd3'])
     # barn interior + sliding doors
     Rr(BX + 26, BY + 40, BX + 66, BY + 74, C['K'])
     if barn_open > 0.02:
@@ -196,25 +225,44 @@ def scene(t, *, house_lit=False, fire=0.0, burn=0.0, barn_open=0.0,
     if farmer_x is not None:
         Rr(int(farmer_x) + 3, 158, int(farmer_x) + 11, 158, C['dirt'])
         blit(px, farmer(int((farmer_x // 5) % 2)), int(farmer_x), 138)
-    # beetle + lantern on the post: amber asleep, red when the node acts
+    # the mascot sits on the fence post -- but ONLY where a node is installed.
+    # In the half with no BioGuard there is nothing on that post, which is the
+    # whole point of that half.
     bxx, byy = R.POST_X - 8, 107
-    blit(px, R.BEETLE, bxx, byy)
     lx, ly = bxx + 18, byy + 4
-    Rr(bxx + 16, byy + 4, bxx + 17, byy + 9, C['b']); Rr(bxx + 17, byy + 3, bxx + 19, byy + 4, C['B'])
-    Rr(lx, ly, lx + 7, ly + 1, C['K']); Rr(lx, ly + 1, lx + 7, ly + 9, C['K'])
-    lamp = C['dng'] if alert > 0.5 else C['gl']
-    lamp2 = C['dng'] if alert > 0.5 else C['lit2']
-    Rr(lx + 1, ly + 2, lx + 6, ly + 8, lamp); Rr(lx + 2, ly + 3, lx + 5, ly + 7, lamp2)
-    Rr(lx + 3, ly - 2, lx + 5, ly - 1, C['K'])
+    lamp = lamp2 = None
+    if beetle:
+        blit(px, R.BEETLE, bxx, byy)
+        Rr(bxx + 16, byy + 4, bxx + 17, byy + 9, C['b']); Rr(bxx + 17, byy + 3, bxx + 19, byy + 4, C['B'])
+        Rr(lx, ly, lx + 7, ly + 1, C['K']); Rr(lx, ly + 1, lx + 7, ly + 9, C['K'])
+        lamp = C['dng'] if alert > 0.5 else C['gl']
+        lamp2 = C['dng'] if alert > 0.5 else C['lit2']
+        Rr(lx + 1, ly + 2, lx + 6, ly + 8, lamp); Rr(lx + 2, ly + 3, lx + 5, ly + 7, lamp2)
+        Rr(lx + 3, ly - 2, lx + 5, ly - 1, C['K'])
+        if label:                            # named, in world space, so it pans with him
+            lbl = "BIOGUARD"; w = tw(lbl, 1)
+            lxx = bxx
+            d.rectangle([lxx - 3, byy - 13, lxx + w + 1, byy - 3], fill=(8, 8, 10))
+            text(d, lbl, lxx, byy - 12, C['ok'] if alert > 0.5 else C['dim'], 1)
+    if truck_x is not None:                  # engines in from the village road
+        for i, dx in enumerate((0, 46)):
+            tx = int(truck_x) - dx
+            if tx < -36 or tx > WW: continue
+            blit(px, TRUCK, tx, 143)
+            beacon = C2['blu'] if int(t * 7 + i) % 2 == 0 else C['dng']
+            Rr(tx + 10, 141, tx + 16, 143, beacon)
+            glow(img.load(), tx + 13, 143, 15, beacon, 0.55)
+            px = img.load()
     px = img.load()
     if burn > 0.0: burn_barn(img, burn, clean_px())   # before the fire: needs clean palette
     if fire > 0.0: draw_fire(img, fire, t)
     if spark: draw_spark(img, t)
     px = img.load()
-    flick = 0.44 + 0.06 * math.sin(t * 11.0) + 0.03 * math.sin(t * 23.0)
-    glow(px, lx + 3, ly + 5, 26 if alert > 0.5 else 22, lamp, flick + 0.25 * alert)
+    if beetle:
+        flick = 0.44 + 0.06 * math.sin(t * 11.0) + 0.03 * math.sin(t * 23.0)
+        glow(px, lx + 3, ly + 5, 26 if alert > 0.5 else 22, lamp, flick + 0.25 * alert)
     if house_lit:
-        glow(px, hx + 14, hy + 31, 15, C['lit'], 0.30)
+        glow(px, hx + 14, hy + 31, 15 + int(6 * phone), C['lit'], 0.30 + 0.42 * phone)
     if barn_open > 0.05:
         glow(px, BX + 46, BY + 56, 30, C['gl'],
              0.40 * barn_open * (1.0 - 0.45 * min(1.0, animals_out)))
@@ -283,8 +331,19 @@ CARDS  = P1_END                    # 08:30 / 11:00
 MID    = CARDS + 2 * D_STAMP       # the restart, announced
 P2     = MID + D_MID               # hard cut back, local2 starts at 3.2
 P2_OFF = 3.2
-ACT    = P2 + 1.4                  # the node acts. one frame.
-END    = ACT + 3.0
+# Half two is the only part of the film where the camera moves. Half one is
+# locked and dead; half two follows a human. The contrast is the point.
+H2_ACT   = 1.4                     # the node acts. one frame.
+H2_PAN   = 2.3                     # start swinging left to the house
+H2_PANE  = 3.3                     # ... arrive
+H2_RUN   = 4.4                     # he is out and moving
+H2_RUNE  = 7.9                     # he reaches the barn
+H2_TRUCK = 8.8                     # engines enter frame
+H2_LEN   = 11.6
+HOUSE_CAM = 150
+
+ACT    = P2 + H2_ACT
+END    = P2 + H2_LEN
 TOTAL  = END + D_FINAL
 
 TAG1, TAG1C = "WITHOUT BIOGUARD", 'dng'
@@ -316,7 +375,8 @@ def frame_seq(t):
             u = (L - 3.9) / 5.1                      # smoulder -> open fire
             fire = min(1.0, 0.04 + ease(min(1.0, u)) * 0.96)
         burn = 0.0 if L < 5.2 else min(0.95, ease(min(1.0, (L - 5.2) / 8.0)) * 0.95)
-        fr = camera(scene(L, house_lit=False, fire=fire, burn=burn, spark=spark), *CAM)
+        fr = camera(scene(L, house_lit=False, fire=fire, burn=burn, spark=spark,
+                          beetle=False), *CAM)
         sub = "NOBODY WOKE UP" if L >= 9.0 else None
         return hud(fr, _p1_clock(L), sub=sub, tag=TAG1, tagcol=TAG1C)
     # ── the two timestamps that do all the work ─────────────────────────
@@ -333,28 +393,64 @@ def frame_seq(t):
         return card([("THE SAME NIGHT.", 2, 'txt'),
                      ("THE SAME FAULT.", 2, 'txt'),
                      ("€40 ON THE WALL.", 1, 'ok')], a)
-    # ── half two: the same night, with the node ─────────────────────────
-    L = P2_OFF + (t - P2)
-    flash = 1.0 if ACT <= t < ACT + 1.0 / FPS else 0.0
-    acted = t >= ACT
+    # ── half two: the same night, with a node on the post ───────────────
+    t2 = t - P2
+    L = P2_OFF + t2
+    acted = t2 >= H2_ACT
+    flash = 1.0 if H2_ACT <= t2 < H2_ACT + 1.0 / FPS else 0.0
     spark = 3.6 <= L < 3.75
+
+    # the fire starts exactly as it did before, and is then cut off at the knees
     fire = 0.0
     if L >= 3.9:
-        fire = min(0.16, 0.04 + (L - 3.9) * 0.17)        # never gets past smoulder
-    if acted:                                            # sprinkler + extraction
-        fire = max(0.0, fire - (t - ACT) * 0.13)
-    barn_open = ease(min(1.0, (t - ACT) / 0.8)) if acted else 0.0
-    animals = min(1.0, max(0.0, (t - ACT - 0.6) / 2.0))
+        fire = min(0.16, 0.04 + (L - 3.9) * 0.17)
+    if acted:
+        fire = max(0.025, fire - (t2 - H2_ACT) * 0.13)   # sprinkler + extraction
+
+    # he hears it, comes out, and we walk with him
+    door = ease(min(1.0, max(0.0, (t2 - H2_PANE) / 0.7)))
     fx = None
-    if t >= ACT + 1.0:
-        fx = 258 + ease(min(1.0, (t - ACT - 1.0) / 1.9)) * 122
+    if t2 >= H2_RUN - 0.35:
+        u = ease(min(1.0, (t2 - (H2_RUN - 0.35)) / (H2_RUNE - H2_RUN + 0.35)))
+        fx = 88 + u * 330
+    camx = CAM[0]
+    if H2_PAN <= t2 < H2_PANE:                    # swing left to the house
+        camx = CAM[0] + (HOUSE_CAM - CAM[0]) * ease((t2 - H2_PAN) / (H2_PANE - H2_PAN))
+    elif t2 >= H2_PANE:
+        camx = HOUSE_CAM if fx is None else max(HOUSE_CAM, min(CAM[0], fx + 44))
+
+    barn_open = ease(min(1.0, max(0.0, (t2 - H2_RUNE) / 0.8)))
+    animals = min(1.0, max(0.0, (t2 - H2_RUNE - 0.5) / 1.6))
+    truck_x = None
+    if t2 >= H2_TRUCK:                            # engines, from the village road
+        truck_x = 150 + ease(min(1.0, (t2 - H2_TRUCK) / 2.0)) * 195
+
+    # two pulses on the window between the pan landing and the door opening
+    phone = 0.0
+    if H2_PANE - 0.9 <= t2 < H2_PANE + 0.5:
+        phone = max(0.0, math.sin((t2 - (H2_PANE - 0.9)) * 9.0))
     fr = camera(scene(L, house_lit=acted, loft_lit=acted, fire=fire, burn=0.0,
                       spark=spark, barn_open=barn_open, animals_out=animals,
-                      farmer_x=fx, alert=1.0 if acted else 0.0), *CAM)
-    if flash:                                            # one frame of red
+                      farmer_x=fx, alert=1.0 if acted else 0.0,
+                      beetle=True, label=True, door_open=door, truck_x=truck_x,
+                      phone=phone),
+                camx, CAM[1], CAM[2])
+    if flash:
         fr = Image.blend(fr, Image.new('RGB', (W, H), C['dng']), 0.62)
-    sub = "THE NODE ACTED" if acted else None
-    fr = hud(fr, tc(L), sub=sub, tag=TAG2, tagcol=TAG2C)
+
+    # The engines take 3 s of screen time but the clock does NOT pretend they
+    # teleported: /fire quotes ETA ~18 min from Statia Lugoj and the film must
+    # not contradict our own console. Screen time compresses; the clock tells
+    # the truth, and "brigade at 02:58" against "brigade at 11:00" is the
+    # comparison we actually want the jury holding.
+    if t2 >= H2_TRUCK:
+        clock, sub = "02:58", "BRIGADE ON SITE"
+    elif acted:
+        clock, sub = tc(L), "THE NODE ACTED"
+    else:
+        clock, sub = tc(L), None
+    fr = hud(fr, clock, sub=sub, tag=TAG2, tagcol=TAG2C)
+
     if t >= END:                                         # the closing number
         a = min(1.0, (t - END) / 0.7)
         cd = card([("6 HOURS", 3, 'dng'), ("→", 3, 'dim'), ("1 SECOND", 3, 'ok')], 1.0)

@@ -112,10 +112,17 @@ whatever is actually in the cloud and re-run the held-out validation live.
 
 To point it at a real project (all optional — unset means LocalStore):
 ```
-export BIOGUARD_FIREBASE_KEY=/path/to/service-account.json
+export BIOGUARD_FIREBASE_KEY=~/.bioguard/service-account.json   # THIS project's key
 export BIOGUARD_FARM_ID=strajer-01          # which farm this gateway is
 export BIOGUARD_CLOUD=auto                  # on | off | auto
 ```
+Live project is **`bioguard-c75cc`**. The service-account key lives at
+`~/.bioguard/service-account.json` (mode 600, deliberately **outside the repo** so it can
+never be committed) — never paste its contents anywhere; it holds a private key.
+Firestore rules are still Google's test-mode default: **world read+write until 2026-09-25**.
+Fine for the hackathon, but if a judge asks about the cloud's security posture, the honest
+answer is that device→cloud writes are service-account authenticated while client reads are
+currently open, and the fix is a one-line rule change to `allow read: if true; allow write: if false;`.
 The Flutter **Fleet** tab reads Firestore *directly* (paste the web config into
 `lib/firebase_options.dart`), so on a phone over mobile data it needs no laptop in the loop;
 if Firebase can't initialise it transparently falls back to the bridge's `/cloud/api/fleet`,

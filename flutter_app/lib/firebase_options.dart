@@ -5,13 +5,17 @@
 /// machine that has to build the demo tomorrow morning.
 ///
 /// ─────────────────────────────────────────────────────────────────────────
-///  TO CONNECT THE REAL PROJECT — paste four values and rebuild:
+///  WIRED to the live project `bioguard-c75cc` (26.08).
 ///
-///  Firebase console -> your project -> ⚙ Project settings -> General
-///    -> "Your apps" -> Web app (</>) -> "SDK setup and configuration"
+///  These are CLIENT-SIDE values and are meant to ship inside the app — an
+///  apiKey here is a project identifier, not a secret, and grants nothing on
+///  its own. What actually guards the data is the Firestore security rules.
+///  The thing that IS secret is the service-account key the bridge uses; it
+///  lives at ~/.bioguard/service-account.json, outside the repo, and must
+///  never appear in this file or any other tracked file.
 ///
-///  Copy apiKey, appId, messagingSenderId, projectId into _web below.
-///  `configured` flips to true automatically once apiKey is non-empty.
+///  To repoint at a different project, replace the six values below and
+///  rebuild with:  flutter build web --release --base-href /app/
 /// ─────────────────────────────────────────────────────────────────────────
 ///
 /// With the placeholders left empty the app is still fully functional: the
@@ -24,12 +28,12 @@ import 'package:firebase_core/firebase_core.dart';
 
 class DefaultFirebaseOptions {
   static const _web = FirebaseOptions(
-    apiKey: '',                 // <- paste
-    appId: '',                  // <- paste
-    messagingSenderId: '',      // <- paste
-    projectId: '',              // <- paste
-    authDomain: '',             // optional: <projectId>.firebaseapp.com
-    storageBucket: '',          // optional: <projectId>.firebasestorage.app
+    apiKey: 'AIzaSyBpqru4stmQ4mVKB06nkt8kSnZrpleYdLU',
+    appId: '1:199283265474:web:12a3c86616bd6bfe02505b',
+    messagingSenderId: '199283265474',
+    projectId: 'bioguard-c75cc',
+    authDomain: 'bioguard-c75cc.firebaseapp.com',
+    storageBucket: 'bioguard-c75cc.firebasestorage.app'
   );
 
   /// Android and iOS reuse the web values here. A real release would carry

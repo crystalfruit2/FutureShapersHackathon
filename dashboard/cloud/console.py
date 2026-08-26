@@ -31,7 +31,17 @@ MARKER_TYPES = ("DISTRESS_SOUND", "FOOD_LOW", "WATER_LOW", "NH3_HIGH",
                 "NH3_CRITICAL", "TEMP_CRITICAL", "GAS_CRITICAL", "MORTALITY")
 
 _cache = {"t": 0.0, "payload": None}
-CACHE_SEC = 4.0          # the page polls; Firestore reads cost money
+CACHE_LOCAL = 4.0        # LocalStore reads are free — keep the page lively
+CACHE_CLOUD = 15.0       # Firestore reads are metered, and the free tier is
+                         # 50 k/day. One /cloud refresh costs ~11 reads, so a
+                         # 4 s poll left open overnight burns the entire daily
+                         # quota before the 10:00 presentation — the console
+                         # would then be dead exactly when it is needed.
+
+
+def _cache_sec():
+    return CACHE_CLOUD if getattr(open_store(), "kind", "") == "firestore" \
+        else CACHE_LOCAL
 
 
 def _model(store):
@@ -92,7 +102,7 @@ def _farm_view(store, farm: dict, model, deep: bool = False):
 
 
 def _fleet_payload(force: bool = False):
-    if not force and _cache["payload"] and time.time() - _cache["t"] < CACHE_SEC:
+    if not force and _cache["payload"] and time.time() - _cache["t"] < _cache_sec():
         return _cache["payload"]
     store = open_store()
     model = _model(store)
@@ -504,5 +514,10 @@ async function openD(id){
 function closeD(){ $('#drawer').classList.remove('on'); }
 document.addEventListener('keydown',e=>{ if(e.key=='Escape') closeD(); });
 
-tick(); setInterval(tick, 4000);
+// A backgrounded tab must not keep spending Firestore reads. Without this
+// guard a laptop left open overnight arrives at the presentation with the
+// daily quota already exhausted.
+tick();
+setInterval(() => { if (!document.hidden) tick(); }, 4000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
 </script></body></html>"""
