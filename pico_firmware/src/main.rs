@@ -6,6 +6,7 @@ mod lcd;
 mod telemetry;
 mod gas;
 mod temp_hum;
+mod wifi;
 
 use defmt_rtt as _;
 use panic_probe as _;
@@ -57,4 +58,16 @@ async fn main(spawner: Spawner) {
     // Setup DHT11
     let dht_flex_pin = Flex::new(p.PIN_15);
     spawner.spawn(temp_hum::read_dht11(dht_flex_pin).unwrap());
+
+    // Wifi AP + telemetry-on-request server
+    wifi::init(
+        spawner,
+        p.PIO0,
+        p.PIN_23,
+        p.PIN_24,
+        p.PIN_25,
+        p.PIN_29,
+        p.DMA_CH0,
+    )
+        .await;
 }

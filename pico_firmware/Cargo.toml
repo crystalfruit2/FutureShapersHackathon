@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "rp-pico-2w"
+name = "pico_firmware"
 path = "src/main.rs"
 test = false
 bench = false
@@ -17,6 +17,14 @@ embassy-time = { version = "0.5.1", features = ["defmt"] }
 embassy-sync = "0.8.0"
 embassy-futures = "0.1.2"
 embassy-dht-sensor = { version = "0.2.9", default-features = false, features = ["dht1x", "rp_no_pio", "rp2040"] }
+embassy-net = { version = "0.9.1", features = ["tcp", "proto-ipv4", "medium-ethernet", "dhcpv4"] }
+cyw43 = "0.7.0"
+cyw43-pio = "0.10.0"
+
+static_cell = "2.1.1"
+
+portable-atomic = { version = "1", features = ["critical-section"] }
+critical-section = "1.1"
 
 # Logs & panic
 defmt = "1.1.1"
@@ -30,3 +38,4 @@ cortex-m-rt = "0.7.5"
 # Disply driver
 hd44780-driver = "0.4.0"
 heapless = "0.9.3"
+embedded-io-async = "0.7.0"
