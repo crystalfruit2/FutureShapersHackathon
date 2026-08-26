@@ -8,6 +8,7 @@ use crate::telemetry::TELEMETRY;
 use crate::state::{STATE, State, AlertType};
 
 const GAS_ALERT_THRESHOLD: u16 = 3000;
+const WATER_ALERT_THRESHOLD: u16 = 0;
 
 #[embassy_executor::task]
 pub async fn read_gas_water(
@@ -34,9 +35,9 @@ pub async fn read_gas_water(
             tx.send(State::Alert(AlertType::Gas));
         }
 
-        // if water_level > WATER_ALERT_THRESHOLD {
-        //     tx.send(State::Alert(AlertType::Water));
-        // }
+        if water_level < WATER_ALERT_THRESHOLD {
+            tx.send(State::Alert(AlertType::WaterLevel));
+        }
 
         // 4. Delay until next reading
         Timer::after_millis(500).await;
