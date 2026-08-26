@@ -7,6 +7,7 @@ mod telemetry;
 mod gas;
 mod temp_hum;
 mod wifi;
+mod servo;
 
 use defmt_rtt as _;
 use panic_probe as _;
@@ -18,6 +19,7 @@ use embassy_rp::adc::{Adc, Channel, Config as AdcConfig, InterruptHandler as Adc
 use embassy_rp::gpio::{Flex, Level, Output, Pull};
 use embassy_rp::i2c::{Config as I2cConfig, I2c, InterruptHandler as I2cInterruptHandler};
 use embassy_rp::peripherals;
+use embassy_rp::pwm::{Config as PwmConfig, Pwm};
 
 use defmt::info;
 
@@ -59,6 +61,15 @@ async fn main(spawner: Spawner) {
     // Setup DHT11
     let dht_flex_pin = Flex::new(p.PIN_15);
     spawner.spawn(temp_hum::read_dht11(dht_flex_pin).unwrap());
+
+    // PWM door
+    let mut pwm_config = PwmConfig::default();
+    pwm_config.divider = 125.into();
+    pwm_config.top = 20000;
+    // Initialize the PWM slice using PIN_6 (maps to Slice 3, output A)
+    let pwm = Pwm::new_output_a(p.PWM_SLICE3, p.PIN_6, pwm_config.clone());
+    // Spawn the task
+    spawner.spawn(servo::door_controller(pwm, pwm_config).unwrap());
 
     // Wifi AP + telemetry-on-request server
     wifi::init(
