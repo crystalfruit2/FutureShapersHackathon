@@ -339,8 +339,15 @@ H2_PAN   = 2.3                     # start swinging left to the house
 H2_PANE  = 3.3                     # ... arrive
 H2_RUN   = 4.4                     # he is out and moving
 H2_RUNE  = 7.9                     # he reaches the barn
-H2_TRUCK = 8.8                     # engines enter frame
-H2_LEN   = 11.6
+# Half one taught the audience how this film compresses time: the clock skips
+# while the shot holds. Half two has to speak the same language, or the cut
+# from 02:40:11 to 02:58 reads as a glitch. So: he stands with the animals,
+# the clock skips four stamps toward 02:58, and only then do the engines roll.
+H2_WAIT  = 8.6                     # skips start -- he is at the barn, waiting
+SKIPS2   = ["02:42", "02:46", "02:51", "02:55"]
+SKIP2_HOLD = 0.6
+H2_TRUCK = H2_WAIT + len(SKIPS2) * SKIP2_HOLD    # 11.0 -- engines enter frame
+H2_LEN   = H2_TRUCK + 2.8
 HOUSE_CAM = 150
 
 ACT    = P2 + H2_ACT
@@ -452,6 +459,9 @@ def frame_seq(t):
     # comparison we actually want the jury holding.
     if t2 >= H2_TRUCK:
         clock, sub = "02:58", "BRIGADE ON SITE"
+    elif t2 >= H2_WAIT:                       # same skip device as half one
+        i = min(len(SKIPS2) - 1, int((t2 - H2_WAIT) / SKIP2_HOLD))
+        clock, sub = SKIPS2[i], "BRIGADE EN ROUTE"
     elif t2 >= H2_DOOR + 1.7:                 # after the doors have visibly snapped open
         clock, sub = tc(L), "DOORS OPENED - AUTOMATIC"
     elif acted:

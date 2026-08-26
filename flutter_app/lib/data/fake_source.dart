@@ -15,6 +15,7 @@ class FakeDataSource implements StrajerDataSource {
 
   final Map<String, double> _v = {};
   final Set<String> _sim = {}; // only marks channels the USER injected
+  final Set<String> _manualLight = {}; // zones whose light the operator drives
   FarmMode _mode = FarmMode.day;
   FarmMode _modeBeforeEmergency = FarmMode.day;
   double _fanOnSec = 0, _totalSec = 0;
@@ -121,14 +122,27 @@ class FakeDataSource implements StrajerDataSource {
       _setMode(_modeBeforeEmergency); // a night-armed farm stays armed
       _emitEvent('hall', 'GAS_CLEARED', gasMax.round(), Severity.info);
     }
-    if ((_v['field.motion'] ?? 0) >= 1 && _mode == FarmMode.night) {
+    // Organic motion is only an intrusion while the farm is armed — by day
+    // that is the farmer. Motion the operator INJECTED from the bench is
+    // always reported, so the demo does not depend on remembering to arm.
+    if ((_v['field.motion'] ?? 0) >= 1 &&
+        (_mode == FarmMode.night ||
+            _mode == FarmMode.lockdown ||
+            _sim.contains('field.motion'))) {
       _emitEvent('field', 'INTRUDER', 1, Severity.alert);
       _v['field.motion'] = 0;
+      _sim.remove('field.motion');
     }
     if ((_v['hall.nh3'] ?? 0) >= 25) _fan = 1;
-    // storage/control lights follow motion ("light goes on when somebody enters")
-    _v['stor.light'] = (_v['stor.motion'] ?? 0) >= 1 ? 1 : 0;
-    _v['ctrl.light'] = (_v['ctrl.motion'] ?? 0) >= 1 ? 1 : 0;
+    // storage/control lights follow motion ("light goes on when somebody
+    // enters") — until the operator takes a room over from the app, after
+    // which the motion rule would fight the switch on every tick
+    if (!_manualLight.contains('stor')) {
+      _v['stor.light'] = (_v['stor.motion'] ?? 0) >= 1 ? 1 : 0;
+    }
+    if (!_manualLight.contains('ctrl')) {
+      _v['ctrl.light'] = (_v['ctrl.motion'] ?? 0) >= 1 ? 1 : 0;
+    }
 
     _totalSec++;
     if (_fan > 0) _fanOnSec++;
@@ -277,7 +291,12 @@ class FakeDataSource implements StrajerDataSource {
     // offline demo generator: no auth surface here — RBAC/PIN/lockdown live
     // on the bridge, which Live mode exercises for real
     _ctr++;
-    switch (action) {
+    // Zone-scoped form is "<VERB>|<zone>"; a bare verb is the legacy poultry
+    // hall command the bridge and firmware already speak.
+    final bar = action.indexOf('|');
+    final verb = bar < 0 ? action : action.substring(0, bar);
+    final zone = bar < 0 ? 'hall' : action.substring(bar + 1);
+    switch (verb) {
       case 'ARM': _exitEmergency(); _setMode(FarmMode.night);
       case 'DISARM': _exitEmergency(); _setMode(FarmMode.day);
       case 'FAN_ON': _fan = 1;
@@ -285,8 +304,12 @@ class FakeDataSource implements StrajerDataSource {
       case 'VENT': _vent = _vent == 1 ? 0 : 1;
       case 'CFAN_ON': _cfan = 1;
       case 'CFAN_OFF': _cfan = 0;
-      case 'LIGHT_ON': _v['hall.light'] = 1;
-      case 'LIGHT_OFF': _v['hall.light'] = 0;
+      case 'LIGHT_ON':
+        _v['$zone.light'] = 1;
+        _manualLight.add(zone);
+      case 'LIGHT_OFF':
+        _v['$zone.light'] = 0;
+        _manualLight.add(zone);
       case 'SPRINKLER_ON': _spr = 1;
       case 'SPRINKLER_OFF': _spr = 0;
       case 'REFILL_WATER':

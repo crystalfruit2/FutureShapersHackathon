@@ -51,7 +51,7 @@ interpolation overshoots between equal keyframes and threw the camera off the wo
 ## Pitch cold open (`coldopen.py`)
 
 A **second, separate film** from the attract loop above, which is untouched and still
-plays on the table. This one opens the pitch. **41 s**, silent, English.
+plays on the table. This one opens the pitch. **43.5 s**, silent, English.
 
 `bioguard_coldopen.mp4` — 1280×720, 24 fps. Rebuild: `python3 coldopen.py`, then the
 same ffmpeg line as above with `co_frames`. One moment: `python3 coldopen.py still 26.4`.
@@ -91,7 +91,7 @@ announcing the restart, the bare-vs-occupied post, and the lantern amber→red.
 
 Text holds are deliberately long (`D_OPEN` `D_STAMP` `D_MID` `D_FINAL` `SKIP_HOLD`): a
 card that reads fine on a laptop is gone before anyone at the back of a room has finished
-it. Trim levers if the 41 s needs to come down: the half-one fire ramp (`/ 5.1`) and the
+it. Trim levers if the 43.5 s needs to come down: the half-one fire ramp (`/ 5.1`), the brigade clock-skip holds (`SKIP2_HOLD`), and the
 number of `SKIPS` stamps. Cut those before cutting any card.
 
 | | where | knob |

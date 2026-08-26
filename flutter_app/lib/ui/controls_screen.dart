@@ -11,8 +11,6 @@ class ControlsScreen extends StatefulWidget {
 }
 
 class _ControlsScreenState extends State<ControlsScreen> {
-  double _gas = 120, _nh3 = 8;
-
   /// Every remote actuator command goes through here. Outside the auth window
   /// it proves the operator first; inside it, it just runs. Guarding at the
   /// single call site rather than inside AppState.command keeps the firmware's
@@ -53,138 +51,37 @@ class _ControlsScreenState extends State<ControlsScreen> {
               const SizedBox(height: 8),
               Text(
                 switch (app.role) {
-                  'admin' => 'Full control — protected commands are PIN-signed.',
+                  'admin' =>
+                    'The only role that may change anything remotely — and every '
+                        'change is PIN-proven and signed.',
                   'operator' =>
-                    'Runs the farm day-to-day, but cannot switch safety gear off mid-incident and cannot push firmware.',
+                    'Reads the farm and runs the bench. Remote actuator control is '
+                        'closed to this role, here AND at the bridge.',
                   _ =>
-                    'Read-only. Controls are disabled here AND the bridge rejects anything this role sends.',
+                    'Read-only. Controls are disabled here AND the bridge rejects '
+                        'anything this role sends.',
                 },
                 style: Theme.of(context).textTheme.bodySmall,
               ),
             ]),
           ),
+          // Remote change is an admin action, full stop. Operator and viewer
+          // read the farm; only admin reaches the actuators, and even admin
+          // proves the PIN first.
           AbsorbPointer(
-            absorbing: app.role == 'viewer',
+            absorbing: app.role != 'admin',
             child: Opacity(
-              opacity: app.role == 'viewer' ? 0.45 : 1.0,
+              opacity: app.role != 'admin' ? 0.45 : 1.0,
               child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-          const SectionLabel('Demo director'),
-          Panel(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text('One tap = one rehearsed pitch scene. The operator taps, the narrator talks.',
-                  style: Theme.of(context).textTheme.bodySmall),
-              const SizedBox(height: 10),
-              Row(children: [
-                for (final (n, label) in [(1, 'Control'), (2, 'Energy'), (3, 'Security'), (4, 'Gas + cyber')]) ...[
-                  Expanded(
-                    child: OutlinedButton(
-                      style: OutlinedButton.styleFrom(
-                          foregroundColor: app.sceneRunning ? T.sub : T.text,
-                          side: const BorderSide(color: T.hairline),
-                          padding: const EdgeInsets.symmetric(vertical: 10)),
-                      onPressed: app.sceneRunning ? null : () => app.runScene(n),
-                      child: Column(children: [
-                        Text('$n', style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
-                        Text(label, style: const TextStyle(fontSize: 10.5)),
-                      ]),
-                    ),
-                  ),
-                  if (n < 4) const SizedBox(width: 8),
-                ],
-              ]),
-              if (app.sceneRunning) ...[
-                const SizedBox(height: 10),
-                Row(children: [
-                  const SizedBox(width: 14, height: 14,
-                      child: CircularProgressIndicator(strokeWidth: 2, color: T.accent)),
-                  const SizedBox(width: 8),
-                  Text('Scene running…', style: Theme.of(context).textTheme.bodySmall),
-                ]),
-              ],
-            ]),
-          ),
-          const SectionLabel('Farm'),
-          Panel(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const _AuthBar(),
-              const SizedBox(height: 12),
-              Row(children: [
-                Expanded(
-                  child: _Toggle(
-                    label: 'Light',
-                    icon: Icons.lightbulb_outlined,
-                    on: app.tel.v('hall.light') == 1,
-                    onChanged: (v) => _guarded(app, v ? 'LIGHT_ON' : 'LIGHT_OFF'),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: _Toggle(
-                    label: 'Fan',
-                    icon: Icons.wind_power_outlined,
-                    on: app.tel.v('cfan') == 1,
-                    onChanged: (v) => _guarded(app, v ? 'CFAN_ON' : 'CFAN_OFF'),
-                  ),
-                ),
-              ]),
-              const SizedBox(height: 10),
-              Row(children: [
-                Expanded(
-                  child: _Toggle(
-                    label: 'Vent flap',
-                    icon: Icons.hvac_outlined,
-                    on: app.tel.v('vent') == 1,
-                    onChanged: (_) => _guarded(app, 'VENT'),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: _Toggle(
-                    label: 'Exhaust fan',
-                    icon: Icons.air,
-                    on: app.tel.v('fan') == 1,
-                    onChanged: (v) => _guarded(app, v ? 'FAN_ON' : 'FAN_OFF'),
-                  ),
-                ),
-              ]),
-              const SizedBox(height: 10),
-              Row(children: [
-                Expanded(
-                  child: _RefillTile(
-                    label: 'Water refill',
-                    icon: Icons.water_drop_outlined,
-                    level: app.tel.v('hall.water'),
-                    onTap: () => _guarded(app, 'REFILL_WATER'),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: _RefillTile(
-                    label: 'Food refill',
-                    icon: Icons.rice_bowl_outlined,
-                    level: app.tel.v('hall.food'),
-                    onTap: () => _guarded(app, 'REFILL_FOOD'),
-                  ),
-                ),
-              ]),
-              const SizedBox(height: 10),
-              Row(children: [
-                Expanded(
-                  child: _Toggle(
-                    label: 'Sprinkler',
-                    icon: Icons.shower_outlined,
-                    on: app.tel.v('spr') == 1,
-                    onChanged: (v) =>
-                        _guarded(app, v ? 'SPRINKLER_ON' : 'SPRINKLER_OFF'),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                const Expanded(child: SizedBox()),
-              ]),
-            ]),
-          ),
+          const SectionLabel('Remote action'),
+          Panel(child: const _AuthBar()),
+          const SizedBox(height: 14),
+          for (final room in _rooms) ...[
+            _RoomPanel(room: room, guard: _guarded),
+            const SizedBox(height: 12),
+          ],
           const SectionLabel('Security'),
           Panel(
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -289,20 +186,6 @@ class _ControlsScreenState extends State<ControlsScreen> {
               Text('Stand-ins for the sensors this kit does not include — injected into the node exactly like real readings.',
                   style: Theme.of(context).textTheme.bodySmall),
               const SizedBox(height: 10),
-              _SliderRow(
-                label: 'Methane (pit)',
-                value: _gas, max: 1023,
-                display: _gas.round().toString(),
-                onChanged: (v) => setState(() => _gas = v),
-                onChangeEnd: (v) => app.simulate('gas', v.round()),
-              ),
-              _SliderRow(
-                label: 'Ammonia (hall)',
-                value: _nh3, max: 80,
-                display: '${_nh3.round()} ppm',
-                onChanged: (v) => setState(() => _nh3 = v),
-                onChangeEnd: (v) => app.simulate('nh3', v.round()),
-              ),
               const SizedBox(height: 4),
               Row(children: [
                 Expanded(
@@ -333,6 +216,119 @@ class _ControlsScreenState extends State<ControlsScreen> {
   }
 }
 
+
+
+/// What each room can actually be driven from the phone.
+///
+/// Deliberately not symmetric: the farm has ONE sprinkler and it hangs in the
+/// storage room, one circulation fan and one vent flap in the poultry hall.
+/// Showing a sprinkler tile under every room would be a nicer grid and a lie,
+/// and this jury reads the telemetry.
+class _Room {
+  final String id, name;
+  final IconData icon;
+  final List<_Act> acts;
+  const _Room(this.id, this.name, this.icon, this.acts);
+}
+
+/// One actuator: how it is labelled, how its state is read, what it sends.
+class _Act {
+  final String label;
+  final IconData icon;
+
+  /// Telemetry channel that reports the real state.
+  final String channel;
+
+  /// Command verb; the room id is appended for anything but the poultry hall,
+  /// which keeps the legacy bare verb the bridge and firmware already speak.
+  final String onCmd, offCmd;
+
+  /// Momentary tiles (refills) send [onCmd] and show a level instead of a switch.
+  final bool momentary;
+  const _Act(this.label, this.icon, this.channel, this.onCmd, this.offCmd,
+      {this.momentary = false});
+}
+
+const _rooms = [
+  _Room('hall', 'Poultry hall', Icons.warehouse_outlined, [
+    _Act('Light', Icons.lightbulb_outlined, 'hall.light', 'LIGHT_ON', 'LIGHT_OFF'),
+    _Act('Circulation fan', Icons.wind_power_outlined, 'cfan', 'CFAN_ON', 'CFAN_OFF'),
+    _Act('Vent flap', Icons.hvac_outlined, 'vent', 'VENT', 'VENT'),
+    _Act('Exhaust fan', Icons.air, 'fan', 'FAN_ON', 'FAN_OFF'),
+    _Act('Water refill', Icons.water_drop_outlined, 'hall.water', 'REFILL_WATER', '',
+        momentary: true),
+    _Act('Food refill', Icons.rice_bowl_outlined, 'hall.food', 'REFILL_FOOD', '',
+        momentary: true),
+  ]),
+  _Room('field', 'Field', Icons.grass_outlined, [
+    _Act('Light', Icons.lightbulb_outlined, 'field.light', 'LIGHT_ON', 'LIGHT_OFF'),
+  ]),
+  _Room('stor', 'Storage room', Icons.inventory_2_outlined, [
+    _Act('Light', Icons.lightbulb_outlined, 'stor.light', 'LIGHT_ON', 'LIGHT_OFF'),
+    _Act('Sprinkler', Icons.shower_outlined, 'spr', 'SPRINKLER_ON', 'SPRINKLER_OFF'),
+  ]),
+  _Room('ctrl', 'Control room', Icons.developer_board_outlined, [
+    _Act('Light', Icons.lightbulb_outlined, 'ctrl.light', 'LIGHT_ON', 'LIGHT_OFF'),
+  ]),
+];
+
+typedef _Guard = Future<void> Function(AppState app, String cmd);
+
+class _RoomPanel extends StatelessWidget {
+  final _Room room;
+  final _Guard guard;
+  const _RoomPanel({required this.room, required this.guard});
+
+  /// Only genuinely per-room gear (the lights) is addressed by zone. The farm
+  /// owns ONE exhaust fan, ONE vent flap, ONE sprinkler — those keep the bare
+  /// verb the bridge and firmware already speak, so Live mode does not break
+  /// on a token nobody parses.
+  String _cmd(_Act a, String verb) =>
+      a.channel.startsWith('${room.id}.') && room.id != 'hall'
+          ? '$verb|${room.id}'
+          : verb;
+
+  @override
+  Widget build(BuildContext context) {
+    final app = context.watch<AppState>();
+    final tiles = <Widget>[];
+    for (final a in room.acts) {
+      tiles.add(a.momentary
+          ? _RefillTile(
+              label: a.label,
+              icon: a.icon,
+              level: app.tel.v(a.channel),
+              onTap: () => guard(app, _cmd(a, a.onCmd)),
+            )
+          : _Toggle(
+              label: a.label,
+              icon: a.icon,
+              on: app.tel.v(a.channel) == 1,
+              onChanged: (v) => guard(app, _cmd(a, v ? a.onCmd : a.offCmd)),
+            ));
+    }
+    return Panel(
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Icon(room.icon, size: 16, color: T.sub),
+          const SizedBox(width: 8),
+          Text(room.name, style: Theme.of(context).textTheme.titleMedium),
+        ]),
+        const SizedBox(height: 12),
+        // two per row, last odd tile keeps its half rather than stretching
+        for (var i = 0; i < tiles.length; i += 2) ...[
+          Row(children: [
+            Expanded(child: tiles[i]),
+            const SizedBox(width: 10),
+            Expanded(
+                child: i + 1 < tiles.length ? tiles[i + 1] : const SizedBox()),
+          ]),
+          if (i + 2 < tiles.length) const SizedBox(height: 10),
+        ],
+      ]),
+    );
+  }
+}
 
 class _RefillTile extends StatelessWidget {
   final String label;
@@ -398,30 +394,6 @@ class _Toggle extends StatelessWidget {
           ]),
         ),
       );
-}
-
-class _SliderRow extends StatelessWidget {
-  final String label, display;
-  final double value, max;
-  final ValueChanged<double> onChanged, onChangeEnd;
-  const _SliderRow(
-      {required this.label, required this.value, required this.max,
-       required this.display, required this.onChanged, required this.onChangeEnd});
-
-  @override
-  Widget build(BuildContext context) =>
-      Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          Text(label, style: Theme.of(context).textTheme.bodyMedium),
-          const Spacer(),
-          Text(display, style: Theme.of(context).textTheme.bodySmall),
-        ]),
-        Slider(
-          value: value.clamp(0, max), max: max,
-          activeColor: T.cyber,
-          onChanged: onChanged, onChangeEnd: onChangeEnd,
-        ),
-      ]);
 }
 
 class _BenchButton extends StatelessWidget {

@@ -106,6 +106,97 @@ class _Done extends StatelessWidget {
       );
 }
 
+/// Full-screen takeover for an intrusion, unacknowledged.
+///
+/// Same reasoning as [EmergencyOverlay]: at 3AM a toast behind a lock screen
+/// is the same as no alarm at all. Kept visually distinct from the gas/fire
+/// takeover — this is a security event, not a life-safety one, and the two
+/// must never be mistaken for each other on stage.
+class IntruderOverlay extends StatelessWidget {
+  const IntruderOverlay({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final app = context.watch<AppState>();
+    final trigger = app.events
+        .where((e) => e.type == 'INTRUDER')
+        .firstOrNull;
+    final zoneId = trigger?.zone ?? 'field';
+    final zone = zoneNames[zoneId] ?? 'the farm';
+    final armed =
+        app.mode == FarmMode.night || app.mode == FarmMode.lockdown;
+    return Material(
+      color: const Color(0xFF17130A),
+      child: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const SizedBox(height: 24),
+            const Icon(Icons.directions_walk_outlined, color: T.warn, size: 48),
+            const SizedBox(height: 20),
+            Text('Movement detected\nin the ${zone.toLowerCase()}',
+                style: const TextStyle(
+                    fontSize: 32,
+                    fontWeight: FontWeight.w700,
+                    color: Colors.white,
+                    height: 1.15,
+                    letterSpacing: -0.5)),
+            const SizedBox(height: 10),
+            Text(
+                armed
+                    ? 'The night watch is armed. Nobody should be out there.'
+                    : 'The farm is not armed — check whether this was you.',
+                style: const TextStyle(fontSize: 15, color: Color(0xFFD8C9A4))),
+            const SizedBox(height: 28),
+            // only claim what telemetry confirms
+            if (app.tel.v('$zoneId.light', 0) == 1)
+              const _Done('Zone lights switched on'),
+            const _Done('Entry written to the tamper-evident log'),
+            const SizedBox(height: 20),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: T.warn.withValues(alpha: 0.14),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: T.warn),
+              ),
+              child: const Row(children: [
+                Icon(Icons.visibility_outlined, color: Colors.white),
+                SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                      'Do not confront anyone yourself.\nThe log is already signed — it is evidence.',
+                      style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w600,
+                          height: 1.3)),
+                ),
+              ]),
+            ),
+            const Spacer(),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton(
+                style: FilledButton.styleFrom(
+                  backgroundColor: Colors.white,
+                  foregroundColor: const Color(0xFF17130A),
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14)),
+                ),
+                onPressed: () => context.read<AppState>().ackIntruder(),
+                child: const Text('I understand — show me the farm',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+              ),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+}
+
 /// Purple toast for cyber events (replay attack rejected etc.) — a demo star.
 class SecToast extends StatelessWidget {
   final StrajerEvent event;

@@ -36,6 +36,7 @@ class AppState extends ChangeNotifier {
   bool usingBridge = false;
   String bridgeUrl = 'http://192.168.1.20:5001';
   bool emergencyAcked = false;
+  bool intruderActive = false; // full-screen intrusion takeover pending ack
   bool sceneRunning = false;
   int pinFails = 0;
   DateTime? pinLockUntil;
@@ -76,6 +77,7 @@ class AppState extends ChangeNotifier {
     connected = false;
     connDetail = 'Connecting…';
     emergencyAcked = false;
+    intruderActive = false;
     _ackedEmergKey = '';
     _leftEmergencyAt = null;
     _secTimer?.cancel();
@@ -149,6 +151,12 @@ class AppState extends ChangeNotifier {
             }
           } else if (m.event.sev == Severity.alert) {
             HapticFeedback.mediumImpact();
+            // an intrusion earns the same full-screen treatment as a fire: at
+            // 3AM a toast behind a lock screen is the same as no alarm at all
+            if (m.event.type == 'INTRUDER') {
+              intruderActive = true;
+              SystemSound.play(SystemSoundType.alert);
+            }
           } else if (m.event.sev == Severity.sec) {
             lastSec = m.event;
             HapticFeedback.selectionClick();
@@ -164,6 +172,11 @@ class AppState extends ChangeNotifier {
         connected = m.connected;
         connDetail = m.detail;
     }
+    notifyListeners();
+  }
+
+  void ackIntruder() {
+    intruderActive = false;
     notifyListeners();
   }
 
@@ -216,7 +229,7 @@ class AppState extends ChangeNotifier {
   /// actuator tap proves the operator again. Fixed from the moment of entry,
   /// deliberately NOT slid forward by activity — the window is a bound on
   /// exposure, not an idle timeout.
-  static const authWindow = Duration(minutes: 1);
+  static const authWindow = Duration(minutes: 10);
 
   bool get authorized =>
       _authUntil != null && DateTime.now().isBefore(_authUntil!);
@@ -420,6 +433,8 @@ class _ShellState extends State<Shell> {
         ),
       ),
       if (emergencyActive) const EmergencyOverlay(),
+      // a gas/fire emergency outranks an intrusion — never stack the two
+      if (!emergencyActive && app.intruderActive) const IntruderOverlay(),
       if (app.lastSec != null) SecToast(event: app.lastSec!),
     ]);
   }
