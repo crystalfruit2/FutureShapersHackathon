@@ -85,6 +85,16 @@ fn telemetry_json(t: &Telemetry) -> String<192> {
         }
     }
 
+    let _ = body.push_str(",\"water_level\":");
+    match t.water_level {
+        Some(v) => {
+            let _ = write!(body, "{}", v);
+        }
+        None => {
+            let _ = body.push_str("null");
+        }
+    }
+
     let _ = body.push_str("}");
     body
 }
