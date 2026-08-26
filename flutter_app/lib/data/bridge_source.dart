@@ -70,6 +70,9 @@ class BridgeDataSource implements StrajerDataSource {
         _ctrl.add(ModeMsg(modeFrom(m['mode'] as String)));
       case 'event':
         _ctrl.add(EventMsg(StrajerEvent.fromBridge(m['event'] as Map<String, dynamic>)));
+      case 'ai':
+        final risk = RiskState.fromBridge(m['ai'] as Map<String, dynamic>);
+        if (risk != null) _ctrl.add(AiMsg(risk));
       case 'log':
         _ctrl.add(AuditMsg([
           for (final r in (m['log'] as List))
@@ -85,6 +88,11 @@ class BridgeDataSource implements StrajerDataSource {
           _ctrl.add(EventMsg(
               StrajerEvent.fromBridge(e as Map<String, dynamic>),
               history: true));
+        }
+        if (m['ai'] is Map<String, dynamic>) {
+          final helloRisk =
+              RiskState.fromBridge(m['ai'] as Map<String, dynamic>);
+          if (helloRisk != null) _ctrl.add(AiMsg(helloRisk));
         }
     }
   }

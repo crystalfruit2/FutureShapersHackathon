@@ -20,6 +20,7 @@ class HomeScreen extends StatelessWidget {
           if (anomalies.isNotEmpty) _AnomalyBanner(anomalies: anomalies),
           if (anomalies.isEmpty) _AllQuiet(app: app),
           const SizedBox(height: 10),
+          _PredictionCard(app: app),
           _FlockCalm(app: app),
           const SectionLabel('Zones'),
           for (final z in zoneMetrics.keys) ...[
@@ -149,6 +150,109 @@ class _AllQuiet extends StatelessWidget {
           ]),
         ),
       ]),
+    );
+  }
+}
+
+/// Tier-2 prediction: fused farm risk, the earliest forecast crossing and
+/// the recommended move. Live mode renders the bridge analyst's numbers;
+/// Demo mode renders FakeDataSource's local mirror of the same fusion.
+class _PredictionCard extends StatelessWidget {
+  final AppState app;
+  const _PredictionCard({required this.app});
+
+  @override
+  Widget build(BuildContext context) {
+    final r = app.risk;
+    if (r == null) return const SizedBox.shrink();
+    final color = switch (r.level) {
+      'HIGH' => T.danger,
+      'ELEVATED' => T.warn,
+      _ => T.ok,
+    };
+    if (r.learning) {
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 10),
+        child: Panel(
+          child: Row(children: [
+            const Icon(Icons.insights_outlined, color: T.sub, size: 20),
+            const SizedBox(width: 10),
+            Expanded(
+                child: Text(
+                    'Prediction — profiling normal operation '
+                    '(${(r.progress * 100).round()}%)',
+                    style: Theme.of(context).textTheme.bodySmall)),
+          ]),
+        ),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Panel(
+        borderColor: r.level == 'LOW' ? null : color,
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            const Icon(Icons.insights_outlined, color: T.sub, size: 18),
+            const SizedBox(width: 8),
+            Text('PREDICTION', style: Theme.of(context).textTheme.labelSmall),
+            const Spacer(),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: 0.14),
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Text('${r.level} · ${(r.score * 100).round()}%',
+                  style: TextStyle(
+                      color: color, fontSize: 12, fontWeight: FontWeight.w700)),
+            ),
+          ]),
+          const SizedBox(height: 10),
+          // score bar — hairline track, semantic fill
+          ClipRRect(
+            borderRadius: BorderRadius.circular(3),
+            child: Container(
+              height: 5,
+              color: T.surface2,
+              child: FractionallySizedBox(
+                alignment: Alignment.centerLeft,
+                widthFactor: r.score.clamp(0.02, 1.0),
+                child: Container(color: color),
+              ),
+            ),
+          ),
+          if (r.eta != null) ...[
+            const SizedBox(height: 10),
+            Row(children: [
+              Icon(Icons.schedule_outlined, color: color, size: 16),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text('${r.etaLabel} forecast critical in ${r.eta}',
+                    style: TextStyle(
+                        color: color, fontSize: 14, fontWeight: FontWeight.w600)),
+              ),
+            ]),
+          ],
+          if (r.drivers.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            for (final d in r.drivers)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 3),
+                child: Text('•  ${d.detail}',
+                    style: Theme.of(context).textTheme.bodySmall),
+              ),
+          ],
+          const SizedBox(height: 6),
+          Row(children: [
+            const Icon(Icons.assistant_direction_outlined,
+                color: T.sub, size: 16),
+            const SizedBox(width: 6),
+            Expanded(
+                child: Text(r.action,
+                    style: Theme.of(context).textTheme.bodySmall)),
+          ]),
+        ]),
+      ),
     );
   }
 }

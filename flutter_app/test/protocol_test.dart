@@ -39,6 +39,32 @@ void main() {
     expect(e.parts[4], 'CH4 rising +240/min to critical in 1m29s');
   });
 
+  test('risk block parses from the AI snapshot', () {
+    final r = RiskState.fromBridge({
+      'learning': false,
+      'progress': 1,
+      'risk': {
+        'score': 0.61,
+        'level': 'ELEVATED',
+        'sev': 'WARN',
+        'eta': '3m53s',
+        'eta_label': 'CH4',
+        'action': 'ventilate the pit and check for a combustion source',
+        'drivers': [
+          {'k': 'gas', 'label': 'CH4', 'zone': 'pit',
+           'pct': 61, 'detail': 'CH4 rising — critical in 3m53s'},
+        ],
+      },
+    });
+    expect(r, isNotNull);
+    expect(r!.level, 'ELEVATED');
+    expect(r.score, 0.61);
+    expect(r.eta, '3m53s');
+    expect(r.drivers.single.label, 'CH4');
+    // an old bridge without the block must not crash the app
+    expect(RiskState.fromBridge({'learning': true}), isNull);
+  });
+
   test('modes map from bridge strings', () {
     expect(modeFrom('EMERGENCY'), FarmMode.emergency);
     expect(modeFrom('DAY'), FarmMode.day);

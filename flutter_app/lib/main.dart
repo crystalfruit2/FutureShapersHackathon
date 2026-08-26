@@ -11,6 +11,7 @@ import 'data/source.dart';
 import 'models.dart';
 import 'ui/controls_screen.dart';
 import 'ui/forecast_screen.dart';
+import 'ui/boot_screen.dart';
 import 'ui/emergency_overlay.dart';
 import 'ui/events_screen.dart';
 import 'ui/fleet_screen.dart';
@@ -29,6 +30,7 @@ class AppState extends ChangeNotifier {
   Telemetry tel = const Telemetry({});
   final List<StrajerEvent> events = [];
   List<AuditRecord> audit = [];
+  RiskState? risk;
   bool connected = false;
   String connDetail = 'Starting…';
   bool usingBridge = false;
@@ -65,6 +67,7 @@ class AppState extends ChangeNotifier {
     audit = [];
     tel = const Telemetry({});
     mode = FarmMode.unknown;
+    risk = null;
     // per-connection / per-episode state must not leak across a source switch:
     // a stale green "Live" chip, or an ack from Demo swallowing a real live
     // emergency inside the flap window
@@ -151,6 +154,8 @@ class AppState extends ChangeNotifier {
             _secTimer = Timer(const Duration(seconds: 6), clearSecToast);
           }
         }
+      case AiMsg():
+        risk = m.risk;
       case AuditMsg():
         audit = m.log;
       case ConnMsg():
@@ -300,7 +305,7 @@ class StrajerApp extends StatelessWidget {
           title: 'BioGuard',
           debugShowCheckedModeBanner: false,
           theme: T.theme(),
-          home: const Shell(),
+          home: const BootGate(child: Shell()),
         ),
       );
 }

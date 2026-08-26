@@ -14,10 +14,10 @@ must emit/accept exactly these lines:
 up:   EVT|<ms>|<zone>|<type>|<value>|<sev>     sev: INFO WARN ALERT EMERG
       TEL|gas=512,nh3=12s,t1=24,...,fan=1,relay=1,vent=0,saved_pct=63   (1 Hz; 's' = simulated)
       STATE|<mode>      SEC|<what>      ACK|<ctr>      LOG|<slot>|<type>|<val>|<min>|<OK/BROKEN/EMPTY>
-      AI|<kind>|<zone>|<what>|<message>|<sev>   kind: PREDICT DRIFT PLAUS STUCK BASELINE
+      AI|<kind>|<zone>|<what>|<message>|<sev>   kind: PREDICT DRIFT PLAUS STUCK BASELINE RISK
                                                 (emitted by the laptop, never by the firmware)
 down: SIM|<name>=<value>                        (demo injection for missing sensors)
-      CMD|<ctr>|<mac>|<ACTION>                  mac = CRC8("<ctr>|<ACTION>" then secret "STRAJER26")
+      CMD|<ctr>|<mac>|<ACTION>                  mac = HMAC-SHA256(secret "STRAJER26", "<ctr>|<ACTION>")[:8 hex]
 ```
 
 ## Dashboard (`dashboard/`, laptop)
@@ -35,7 +35,7 @@ Verified working in fake mode incl. replay rejection.
 Three layers, and the pitch line that goes with them: **reflex** (firmware, ms, cuts the
 valve, needs no network) · **perception** (this analyst, 1 Hz, sees it coming) ·
 **language** (Claude, later). The analyst is **advisory only — it never actuates.** No `CMD|`
-is ever produced by it; commands still carry the CRC8 MAC and the monotonic counter.
+is ever produced by it; commands still carry the truncated HMAC-SHA256 MAC and the monotonic counter.
 Say that out loud in the demo: *a language model cannot open a valve on this farm.*
 
 It reads the same `TEL|` stream everything else reads and emits `AI|` lines back into the

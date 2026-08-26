@@ -28,6 +28,11 @@ class AuditMsg extends SourceMsg {
   AuditMsg(this.log);
 }
 
+class AiMsg extends SourceMsg {
+  final RiskState risk;
+  AiMsg(this.risk);
+}
+
 class ConnMsg extends SourceMsg {
   final bool connected;
   final String detail;

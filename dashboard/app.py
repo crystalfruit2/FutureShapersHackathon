@@ -295,9 +295,13 @@ def script_nist_smoulder():
     with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "nist_mhn40.json")) as fh:
         samples = json.load(fh)["samples"]
+    rh0 = samples[0][2]
     for _t, temp, rh, smoke in samples:
         send_raw(f"SIM|t1={temp:.1f}")
-        send_raw(f"SIM|hum={rh:.0f}")
+        # RH replays the NIST *shape* rebased onto the demo ambient (55%) —
+        # the test hall sat at 41% and a 14-point step at t=0 would read as
+        # its own event; the smoulder's real signature is the -6% sag
+        send_raw(f"SIM|hum={55 + rh - rh0:.0f}")
         send_raw(f"SIM|gas={min(1023.0, 120 + smoke * 3.4):.0f}")
         time.sleep(1.0)
     time.sleep(4)
@@ -467,6 +471,8 @@ class Analyst:
         self.fan_since = None
         self._emitted = {}
         self._risk_level = "LOW"
+        self._risk_hold = 0
+        self.risk_now = None
 
     def relearn(self):
         """Re-learn what 'normal' looks like from now (venue calibration)."""
@@ -544,14 +550,16 @@ class Analyst:
             handle_line(f"AI|{kind}|{zone}|{what}|{msg}|{sev}")
 
         # fused farm-level risk — emitted only when the LEVEL changes, so the
-        # feed gets "risk ELEVATED/HIGH/back to LOW" beats, not a ticker
-        risk = self._risk()
+        # feed gets "risk ELEVATED/HIGH/back to LOW" beats, not a ticker.
+        # Escalation is instant; de-escalation must HOLD for RISK_HOLD_N
+        # samples, or drivers trading places makes the level flap.
+        risk = self._risk_latched()
         if not self.learning and risk["level"] != self._risk_level:
-            self._risk_level = risk["level"]
             top = risk["drivers"][0]["detail"] if risk["drivers"] else "all channels nominal"
             msg = f"farm risk {risk['level']} ({int(risk['score']*100)}%) — {top}"
             self.findings.append({"t": now_t(), "kind": "RISK", "sev": risk["sev"], "msg": msg})
             handle_line(f"AI|RISK|farm|{risk['level']}|{msg}|{risk['sev']}")
+        self._risk_level = risk["level"]
         publish({"type": "ai", "ai": self.snapshot()})
 
     def _freeze_baseline(self):
@@ -667,6 +675,25 @@ class Analyst:
     RISK_W    = {"gas": 1.0, "nh3": 0.85, "t1": 0.9, "t2": 0.5,
                  "hum": 0.35, "water": 0.4}
 
+    RISK_HOLD_N = 8         # ingests a lower level must persist before we drop to it
+    RISK_ORDER  = {"LOW": 0, "ELEVATED": 1, "HIGH": 2}
+
+    def _risk_latched(self):
+        """_risk() with de-escalation hysteresis. Only the ingest path may
+        call this (it mutates the latch); snapshot() serves the cached copy."""
+        raw = self._risk()
+        if self.RISK_ORDER[raw["level"]] >= self.RISK_ORDER[self._risk_level]:
+            self._risk_hold = 0
+        else:
+            self._risk_hold += 1
+            if self._risk_hold >= self.RISK_HOLD_N:
+                self._risk_hold = 0
+            else:
+                raw["level"] = self._risk_level
+                raw["sev"] = {"HIGH": "ALERT", "ELEVATED": "WARN", "LOW": "INFO"}[raw["level"]]
+        self.risk_now = raw
+        return raw
+
     def _risk(self):
         """One explainable 0-1 number for the whole farm (Vivi's multi-sensor
         score, grounded in the analyst's state). Per channel take the
@@ -684,8 +711,13 @@ class Analyst:
             prox = imm = dev = 0.0
             if limit is not None and anchor is not None and limit > anchor:
                 prox = max(0.0, min(1.0, (st["s"] - anchor) / (limit - anchor)))
+            # imminence needs the same discipline _predict() has, or jitter on
+            # a quiet probe manufactures a phantom "critical in 2m" driver
             eta = None
-            if limit and st["slope"] > 0 and st["s"] < limit and st["n"] >= self.MIN_N:
+            sustained = (st["rise"] >= 5
+                         and st["slope"] * 60.0 >= max(1.0, 0.02 * (limit or 0))
+                         and (st["mu"] is None or (st["s"] - st["mu"]) >= 2.0 * st["sd"]))
+            if limit and sustained and st["s"] < limit and st["n"] >= self.MIN_N:
                 e = (limit - st["s"]) / st["slope"]
                 if 0 < e <= 3600:
                     eta = e
@@ -702,7 +734,8 @@ class Analyst:
             elif prox >= 0.7 * dev:
                 detail = f"{label} at {int(round(100 * prox))}% of the span to critical"
             else:
-                detail = f"{label} {(st['s'] - st['mu']) / st['sd']:+.1f}σ off its learned normal"
+                detail = (f"{label} {st['mu']:.0f}{unit} → {st['s']:.0f}{unit} — "
+                          f"far off its learned normal")
             drivers.append({"k": k, "label": label, "zone": zone,
                             "pct": int(round(100 * c)), "detail": detail})
             acc *= 1.0 - self.RISK_W.get(k, 0.5) * c
@@ -758,7 +791,7 @@ class Analyst:
             prog = min(1.0, (time.time() - self.t0) / self.baseline_secs)
         return {"learning": self.learning, "learned_at": self.learned_at,
                 "progress": round(prog, 2), "baseline_secs": int(self.baseline_secs),
-                "risk": self._risk(),
+                "risk": self.risk_now if self.risk_now is not None else self._risk(),
                 "channels": chans, "findings": list(self.findings)}
 
 analyst = Analyst()

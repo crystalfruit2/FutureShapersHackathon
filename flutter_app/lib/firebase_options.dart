@@ -24,6 +24,7 @@
 /// the fleet over the LAN rather than over the internet.
 library;
 
+import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform, TargetPlatform;
 import 'package:firebase_core/firebase_core.dart';
 
 class DefaultFirebaseOptions {
@@ -36,16 +37,43 @@ class DefaultFirebaseOptions {
     storageBucket: 'bioguard-c75cc.firebasestorage.app'
   );
 
-  /// Android and iOS reuse the web values here. A real release would carry
-  /// google-services.json / GoogleService-Info.plist per platform; for a
-  /// Firestore read against a test-mode database the web config is enough,
-  /// and it keeps the demo to one place to edit.
-  static FirebaseOptions get currentPlatform => _web;
+  /// iOS needs its OWN app registration — it cannot borrow the web values.
+  /// The native SDK validates the shape of GOOGLE_APP_ID and raises an
+  /// Objective-C NSException on a `:web:` id ("Configuration fails. It may be
+  /// caused by an invalid GOOGLE_APP_ID…"). That exception crosses no Dart
+  /// boundary, so no try/catch around initializeApp can save the process — the
+  /// app dies on launch. Leave these empty until an iOS app exists in the
+  /// Firebase console; empty means [configured] is false on iOS and the Fleet
+  /// tab reads the bridge instead, which is a working path, not a stub.
+  static const _ios = FirebaseOptions(
+    apiKey: '',
+    appId: '', // must be 1:199283265474:ios:… , never :web:
+    messagingSenderId: '199283265474',
+    projectId: 'bioguard-c75cc',
+    iosBundleId: 'com.alp.strajer.strajerApp',
+  );
+
+  /// Android tolerates the web values today, but for the same reason as iOS it
+  /// deserves its own registration before anyone ships it.
+  static FirebaseOptions? get _platform {
+    if (kIsWeb) return _web;
+    return switch (defaultTargetPlatform) {
+      TargetPlatform.iOS => _ios.appId.isEmpty ? null : _ios,
+      TargetPlatform.android => _web,
+      _ => null,
+    };
+  }
+
+  /// Only read after [configured] has been checked.
+  static FirebaseOptions get currentPlatform => _platform ?? _web;
 
   static String get projectId => _web.projectId;
 
-  /// Whether a real project has been pasted in. FleetService checks this
-  /// before touching Firebase, so an unconfigured build never pays the
-  /// initialisation timeout.
-  static bool get configured => _web.apiKey.isNotEmpty && _web.projectId.isNotEmpty;
+  /// Whether THIS platform has a usable registration. FleetService checks it
+  /// before touching Firebase, so a platform without one never initialises —
+  /// and never crashes on a mismatched app id.
+  static bool get configured {
+    final o = _platform;
+    return o != null && o.apiKey.isNotEmpty && o.projectId.isNotEmpty;
+  }
 }

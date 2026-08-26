@@ -133,6 +133,126 @@ class FakeDataSource implements StrajerDataSource {
     _totalSec++;
     if (_fan > 0) _fanOnSec++;
     _pushTel();
+    _emitRisk();
+  }
+
+  // ── local Tier-2 mirror ────────────────────────────────────────────────
+  // Demo mode has no bridge analyst, so the same fusion runs here: per
+  // channel the stronger of proximity-to-critical and sustained-climb
+  // imminence, noisy-OR blended; flame or EMERGENCY pins the score; a lower
+  // level must hold 8 ticks before we drop to it (same anti-flap rule as
+  // the bridge). Baseline-deviation is bridge-only — it needs the learned
+  // profile the demo generator doesn't have.
+  final Map<String, double> _ema = {}, _slope = {};
+  final Map<String, int> _rise = {};
+  String _riskLevel = 'LOW';
+  int _riskHold = 0;
+
+  // key: (label, limit, weight) — the temp anchor is the diurnal demo curve
+  // itself (a 29° summer afternoon is NORMAL here, not 64% of the way to
+  // critical), mirroring how the bridge anchors on its learned baseline
+  static const _riskCh = {
+    'hall.gas': ('Methane', 700.0, 1.0),
+    'hall.nh3': ('Ammonia', 25.0, 0.85),
+    'hall.temp': ('Temperature', 32.0, 0.9),
+  };
+
+  String _fmtEta(double sec) {
+    final s = sec.round();
+    return s < 60 ? '${s}s' : '${s ~/ 60}m${(s % 60).toString().padLeft(2, '0')}s';
+  }
+
+  void _emitRisk() {
+    final drivers = <RiskDriver>[];
+    var acc = 1.0;
+    double? soonest;
+    String? soonestLabel;
+    for (final e in _riskCh.entries) {
+      final v = _v[e.key];
+      if (v == null) continue;
+      final (label, limit, w) = e.value;
+      final anchor = switch (e.key) {
+        'hall.temp' => demoValue('temp', DateTime.now()),
+        'hall.nh3' => 9.0,
+        _ => 150.0,
+      };
+      final prev = _ema[e.key] ?? v;
+      final ema = prev + 0.35 * (v - prev);
+      _ema[e.key] = ema;
+      final slope =
+          (_slope[e.key] ?? 0) + 0.25 * ((ema - prev) - (_slope[e.key] ?? 0));
+      _slope[e.key] = slope; // per second — ticks arrive at 1 Hz
+      _rise[e.key] = slope > 0 ? (_rise[e.key] ?? 0) + 1 : 0;
+      final prox = ((ema - anchor) / (limit - anchor)).clamp(0.0, 1.0);
+      var imm = 0.0;
+      double? eta;
+      final sustained =
+          (_rise[e.key] ?? 0) >= 5 && slope * 60 >= max(1.0, 0.02 * limit);
+      // ...and the channel must actually be elevated: jitter around the
+      // anchor can fake a sustained climb and forecast a crossing that
+      // never comes (the bridge's 2σ-baseline guard, demo edition)
+      if (sustained && prox >= 0.15 && ema < limit) {
+        final t = (limit - ema) / slope;
+        if (t > 0 && t <= 3600) {
+          eta = t;
+          imm = (1 - t / 600).clamp(0.0, 1.0);
+        }
+      }
+      final c = max(prox, imm);
+      // demo floor is stricter than the bridge's: ambient drift around the
+      // diurnal curve must not decorate a quiet farm with driver bullets
+      if (c < 0.12) continue;
+      if (eta != null && (soonest == null || eta < soonest)) {
+        soonest = eta;
+        soonestLabel = label;
+      }
+      drivers.add(RiskDriver(
+          label,
+          'hall',
+          eta != null && imm >= prox
+              ? '$label rising — critical in ${_fmtEta(eta)}'
+              : '$label at ${(100 * prox).round()}% of the span to critical',
+          (100 * c).round()));
+      acc *= 1 - w * c;
+    }
+    var score = 1 - acc;
+    final anyFire = zoneMetrics.keys.any((z) => (_v['$z.fire'] ?? 0) >= 1);
+    if (_mode == FarmMode.emergency || anyFire) {
+      score = max(score, 0.95);
+      drivers.insert(
+          0,
+          const RiskDriver('reflex', 'farm',
+              'reflex layer engaged — emergency mitigation running', 100));
+    }
+    drivers.sort((a, b) => b.pct - a.pct);
+    var level = score >= 0.7
+        ? 'HIGH'
+        : score >= 0.4
+            ? 'ELEVATED'
+            : 'LOW';
+    const order = {'LOW': 0, 'ELEVATED': 1, 'HIGH': 2};
+    if (order[level]! >= order[_riskLevel]!) {
+      _riskHold = 0;
+    } else if (++_riskHold < 8) {
+      level = _riskLevel;
+    } else {
+      _riskHold = 0;
+    }
+    _riskLevel = level;
+    final action = switch (drivers.firstOrNull?.label) {
+      'reflex' => 'follow the emergency card — the reflex layer is acting',
+      'Methane' => 'ventilate the pit and check for a combustion source',
+      'Ammonia' => 'increase hall ventilation',
+      'Temperature' => 'start cooling and check the heat source',
+      _ => 'monitor — no action needed',
+    };
+    _ctrl.add(AiMsg(RiskState(
+        score: (score.clamp(0.0, 1.0) * 100).round() / 100,
+        level: level,
+        eta: soonest == null ? null : _fmtEta(soonest),
+        etaLabel: soonestLabel,
+        action: action,
+        drivers: drivers.take(3).toList())));
   }
 
   void _pushTel() {

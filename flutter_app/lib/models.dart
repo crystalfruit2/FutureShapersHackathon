@@ -141,6 +141,54 @@ class StrajerEvent {
   }
 }
 
+/// Tier-2 fused farm risk — the bridge analyst's `risk` block. The bridge
+/// is the source of truth in Live mode; FakeDataSource mirrors the same
+/// fusion locally so Demo mode shows an identical Prediction card.
+class RiskDriver {
+  final String label, zone, detail;
+  final int pct;
+  const RiskDriver(this.label, this.zone, this.detail, this.pct);
+}
+
+class RiskState {
+  final double score; // 0..1
+  final String level; // LOW | ELEVATED | HIGH
+  final String? eta; // earliest forecast crossing, e.g. "3m53s"
+  final String? etaLabel; // channel that forecast belongs to
+  final String action;
+  final List<RiskDriver> drivers;
+  final bool learning; // analyst still profiling "normal"
+  final double progress; // 0..1 of the learning window
+  const RiskState(
+      {required this.score,
+      required this.level,
+      this.eta,
+      this.etaLabel,
+      required this.action,
+      required this.drivers,
+      this.learning = false,
+      this.progress = 1});
+
+  static RiskState? fromBridge(Map<String, dynamic> ai) {
+    final r = ai['risk'];
+    if (r is! Map) return null;
+    return RiskState(
+      score: ((r['score'] ?? 0) as num).toDouble(),
+      level: '${r['level'] ?? 'LOW'}',
+      eta: r['eta'] as String?,
+      etaLabel: r['eta_label'] as String?,
+      action: '${r['action'] ?? ''}',
+      drivers: [
+        for (final d in (r['drivers'] as List? ?? []))
+          RiskDriver('${d['label']}', '${d['zone']}', '${d['detail']}',
+              ((d['pct'] ?? 0) as num).round()),
+      ],
+      learning: ai['learning'] == true,
+      progress: ((ai['progress'] ?? 1) as num).toDouble(),
+    );
+  }
+}
+
 class AuditRecord {
   final int slot;
   final String what, val, min, chain;
