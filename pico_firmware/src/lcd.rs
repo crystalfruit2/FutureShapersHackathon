@@ -26,6 +26,10 @@ enum DisplayLine {
     Bottom,
 }
 
+enum DisplayPhase {
+    Gas, Temperature, Humidity
+}
+
 async fn clean_line(
     line: DisplayLine,
     lcd: &mut HD44780<I2CBus<I2c<'static, I2C0, Async>>>,
@@ -128,6 +132,8 @@ pub async fn display_task(i2c: I2c<'static, I2C0, Async>) {
     Timer::after_secs(2).await;
     lcd.clear(&mut delay).unwrap();
 
+    let mut phase: DisplayPhase = DisplayPhase::Gas;
+
     let mut rx = STATE.receiver().unwrap();
     Timer::after_secs(2).await;
     loop {
@@ -146,15 +152,26 @@ pub async fn display_task(i2c: I2c<'static, I2C0, Async>) {
                         write_line(DisplayLine::Bottom, "Humidity level danger", &mut lcd, &mut delay).await;
                     }
                 }
+                rx.changed().await;
                 continue;
             },
             _ => {}
         }
-        display_gas(&mut lcd, &mut delay).await;
-        Timer::after_secs(DISPLAY_ROTATION_TIME_S).await;
-        display_temperature(&mut lcd, &mut delay).await;
-        Timer::after_secs(DISPLAY_ROTATION_TIME_S).await;
-        display_humidity(&mut lcd, &mut delay).await;
+        match phase {
+            DisplayPhase::Gas => {
+                display_gas(&mut lcd, &mut delay).await;
+                phase = DisplayPhase::Temperature;
+            },
+            DisplayPhase::Temperature => {
+                display_temperature(&mut lcd, &mut delay).await;
+                phase = DisplayPhase::Humidity
+            }
+            DisplayPhase::Humidity => {
+                display_humidity(&mut lcd, &mut delay).await;
+                phase = DisplayPhase::Gas;
+            }
+        }
+
         Timer::after_secs(DISPLAY_ROTATION_TIME_S).await;
     }
 }
