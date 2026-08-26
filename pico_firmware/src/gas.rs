@@ -15,6 +15,7 @@ pub async fn read_gas_water(
     mut adc: Adc<'static, Async>,
     mut gas_pin: Channel<'static>,
     mut water_pin: Channel<'static>,
+    mut sound_pin: Channel<'static>,
 ) {
     let tx = STATE.sender();
 
@@ -22,12 +23,14 @@ pub async fn read_gas_water(
         // 1. Read both analog values sequentially
         let gas_level = adc.read(&mut gas_pin).await.unwrap();
         let water_level = adc.read(&mut water_pin).await.unwrap();
+        let sound_level = adc.read(&mut sound_pin).await.unwrap();
 
         // 2. Update telemetry state together
         {
             let mut t = TELEMETRY.lock().await;
             t.gas = Some(gas_level);
             t.water_level = Some(water_level);
+            t.sound_level = Some(sound_level);
         }
 
         // 3. Trigger alerts if thresholds are exceeded
