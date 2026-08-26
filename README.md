@@ -20,6 +20,54 @@ down: SIM|<name>=<value>                        (demo injection for missing sens
       CMD|<ctr>|<mac>|<ACTION>                  mac = HMAC-SHA256(secret "STRAJER26", "<ctr>|<ACTION>")[:8 hex]
 ```
 
+## Real sensor board (Oleksandr's ESP32) — 26.08
+
+The physical sensors arrived as a standalone board, not GPIO on the Pi: it is a **WiFi AP
+`BioGuard`** (password `claude_plan`, **no DHCP**) serving `GET http://192.168.4.1/` →
+
+```json
+{"gas": 1548, "temperature": 24.2, "humidity": 51.0, "water_level": 9}
+```
+
+`temperature`/`humidity` are floats (or `null` while unwired); `gas`/`water_level` are **raw
+0-4095 ADC counts — conversion is our job, server side** (the board's FPU is too slow).
+Conversion (identical in `dashboard/app.py` and `pi_node/bioguard_node.py`):
+gas → 0-1023 a.u. (keeps the 700 critical limit everywhere) · water_level → 0-100 % ·
+temperature → `t1` · humidity → `hum`. A `null`/missing channel stays simulated per-key and
+takes over automatically the moment it appears.
+
+**Connect (laptop, macOS)** — manual IP because there is no DHCP; this drops internet, which
+the cloud sink is built to survive (fail-open → LocalStore):
+
+```
+networksetup -setairportnetwork en0 BioGuard claude_plan
+networksetup -setmanual Wi-Fi 192.168.4.2 255.255.255.0 192.168.4.1
+python3 dashboard/app.py --esp                    # default http://192.168.4.1/
+networksetup -setdhcp Wi-Fi                       # restore normal WiFi afterwards
+```
+
+`--esp` implies the local state machine (`--fake`), so the 4 real channels ride alongside the
+simulated ones — organizer-sanctioned for the sensors we weren't given. Precedence per
+channel: **SIM-pinned (sliders / NIST replay) > board > generated** — a rehearsed demo beat can
+never be stomped by the live board, and the header shows `board: LIVE gas+hum+t1+water`
+(3 missed polls → `board: lost — sim fallback` + a WARN event, demo keeps running).
+Note: while the board is live, `water` is board-owned — the REFILL WATER beat needs a
+`SIM|water=…` pin first.
+
+**Pi in the loop instead:** give the Pi the static IP (same commands, `wlan0`/`dhcpcd` on
+Raspberry Pi OS); `pi_node/bioguard_node.py` now polls the board itself inside its sensor
+hooks, so the reflex layer actuates on real data. The laptop then connects to the Pi as
+before — but both must sit on the BioGuard AP for that TCP link.
+
+**Phone / Flutter app:** join the `BioGuard` AP, set a manual IP (e.g. `192.168.4.3`,
+mask `255.255.255.0`), and point the app's bridge URL (Controls → bridge) at
+`http://192.168.4.2:5001`. The Fleet tab keeps working over mobile data since it reads
+Firestore directly.
+
+**Rehearsal without the hardware:** `python3 dashboard/mock_board.py` serves the exact same
+JSON (incl. `--nulls` for the temp/hum-unwired state) on `:8181` →
+`python3 dashboard/app.py --esp http://127.0.0.1:8181/`.
+
 ## Dashboard (`dashboard/`, laptop)
 ```
 pip3 install flask pyserial

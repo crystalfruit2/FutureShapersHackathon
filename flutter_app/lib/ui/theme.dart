@@ -123,6 +123,7 @@ String humanEvent(String type) => switch (type) {
       'WATER_REFILLED' => 'Water supply refilled',
       'FOOD_REFILLED' => 'Food supply refilled',
       'PIN_OK_DISARMED' => 'Alarm disarmed with PIN',
+      'PIN_OK_CONTROL' => 'Remote control unlocked with PIN',
       'PIN_FAIL' => 'Wrong PIN entered at the panel',
       'BRUTE_FORCE_LOCKDOWN' => 'Repeated wrong PINs — system locked down',
       'REPLAY_REJECTED' => 'Spoofed command blocked — replay attack',

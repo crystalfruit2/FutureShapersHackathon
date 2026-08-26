@@ -39,6 +39,8 @@ class AppState extends ChangeNotifier {
   bool sceneRunning = false;
   int pinFails = 0;
   DateTime? pinLockUntil;
+  DateTime? _authUntil; // remote control is unlocked until this moment
+  Timer? _authTicker;
   String _ackedEmergKey = ''; // zone+type that was acknowledged
   DateTime? _leftEmergencyAt; // flap guard: mode briefly leaving+re-entering EMERGENCY is the same episode
   DateTime _lastEmergSound = DateTime.fromMillisecondsSinceEpoch(0);
@@ -208,16 +210,36 @@ class AppState extends ChangeNotifier {
   /// App-side auth layer: disarming needs the user PIN (arming does not).
   /// PIN mirrors the panel code. 3 misses -> 30 s local lockout.
   static const _pin = [1, 3, 2, 4];
-  PinResult tryDisarm(List<int> digits) {
-    if (pinLockUntil != null && DateTime.now().isBefore(pinLockUntil!)) {
-      return PinResult.locked;
-    }
+
+  /// How long one PIN entry keeps remote control unlocked. A stolen or
+  /// shoulder-surfed phone is only dangerous for this long; after it the next
+  /// actuator tap proves the operator again. Fixed from the moment of entry,
+  /// deliberately NOT slid forward by activity — the window is a bound on
+  /// exposure, not an idle timeout.
+  static const authWindow = Duration(minutes: 1);
+
+  bool get authorized =>
+      _authUntil != null && DateTime.now().isBefore(_authUntil!);
+
+  /// Seconds left on the window, 0 when locked. Drives the Controls header.
+  int get authSecondsLeft {
+    if (_authUntil == null) return 0;
+    final s = _authUntil!.difference(DateTime.now()).inSeconds;
+    return s > 0 ? s : 0;
+  }
+
+  /// True when the local lockout after 3 wrong PINs is still running.
+  bool get pinLockedOut =>
+      pinLockUntil != null && DateTime.now().isBefore(pinLockUntil!);
+
+  /// Shared PIN check. Does not act on its own — callers decide what a
+  /// proven PIN buys (a DISARM, or the remote-control window).
+  PinResult _checkPin(List<int> digits) {
+    if (pinLockedOut) return PinResult.locked;
     if (digits.length == 4 &&
         List.generate(4, (i) => digits[i] == _pin[i]).every((x) => x)) {
       pinFails = 0;
       pinLockUntil = null;
-      command('DISARM', pin: digits.join()); // the digits the user just proved
-      _localEvent('EVT|0|ctrl|PIN_OK_DISARMED|0|INFO', Severity.info);
       return PinResult.ok;
     }
     pinFails++;
@@ -229,6 +251,54 @@ class AppState extends ChangeNotifier {
       return PinResult.locked;
     }
     return PinResult.wrong;
+  }
+
+  PinResult tryDisarm(List<int> digits) {
+    final r = _checkPin(digits);
+    if (r == PinResult.ok) {
+      command('DISARM', pin: digits.join()); // the digits the user just proved
+      _localEvent('EVT|0|ctrl|PIN_OK_DISARMED|0|INFO', Severity.info);
+      _openAuthWindow();
+    }
+    return r;
+  }
+
+  /// Prove the PIN to unlock remote actuator control for [authWindow].
+  PinResult authorizeControl(List<int> digits) {
+    final r = _checkPin(digits);
+    if (r == PinResult.ok) {
+      _localEvent('EVT|0|ctrl|PIN_OK_CONTROL|${authWindow.inSeconds}|INFO',
+          Severity.info);
+      _openAuthWindow();
+    }
+    return r;
+  }
+
+  void _openAuthWindow() {
+    _authUntil = DateTime.now().add(authWindow);
+    _authTicker?.cancel();
+    // one tick a second so the header counts down and re-locks on its own,
+    // without every widget polling the clock
+    _authTicker = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!authorized) {
+        t.cancel();
+        _authTicker = null;
+        _authUntil = null;
+        _localEvent('SEC|CONTROL_RELOCKED|${authWindow.inSeconds}s', Severity.sec);
+      }
+      notifyListeners();
+    });
+    notifyListeners();
+  }
+
+  /// Close the window by hand — the "Lock now" affordance.
+  void lockControl() {
+    if (_authUntil == null) return;
+    _authTicker?.cancel();
+    _authTicker = null;
+    _authUntil = null;
+    _localEvent('SEC|CONTROL_LOCKED|manual', Severity.sec);
+    notifyListeners();
   }
 
   /// Demo director: one tap = one rehearsed pitch scene, correct timing.
@@ -290,6 +360,7 @@ class AppState extends ChangeNotifier {
   @override
   void dispose() {
     _secTimer?.cancel();
+    _authTicker?.cancel();
     _sub?.cancel();
     _source?.dispose();
     super.dispose();

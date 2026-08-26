@@ -13,6 +13,22 @@ class ControlsScreen extends StatefulWidget {
 class _ControlsScreenState extends State<ControlsScreen> {
   double _gas = 120, _nh3 = 8;
 
+  /// Every remote actuator command goes through here. Outside the auth window
+  /// it proves the operator first; inside it, it just runs. Guarding at the
+  /// single call site rather than inside AppState.command keeps the firmware's
+  /// own autonomous actions (a flame emergency opening the sprinkler) free of
+  /// a human gate they must never wait on.
+  Future<void> _guarded(AppState app, String cmd) async {
+    if (!app.authorized) {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (_) => const PinDialog(purpose: PinPurpose.control),
+      );
+      if (ok != true) return;
+    }
+    app.command(cmd);
+  }
+
   @override
   Widget build(BuildContext context) {
     final app = context.watch<AppState>();
@@ -92,13 +108,15 @@ class _ControlsScreenState extends State<ControlsScreen> {
           const SectionLabel('Farm'),
           Panel(
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const _AuthBar(),
+              const SizedBox(height: 12),
               Row(children: [
                 Expanded(
                   child: _Toggle(
                     label: 'Light',
                     icon: Icons.lightbulb_outlined,
                     on: app.tel.v('hall.light') == 1,
-                    onChanged: (v) => app.command(v ? 'LIGHT_ON' : 'LIGHT_OFF'),
+                    onChanged: (v) => _guarded(app, v ? 'LIGHT_ON' : 'LIGHT_OFF'),
                   ),
                 ),
                 const SizedBox(width: 10),
@@ -107,7 +125,7 @@ class _ControlsScreenState extends State<ControlsScreen> {
                     label: 'Fan',
                     icon: Icons.wind_power_outlined,
                     on: app.tel.v('cfan') == 1,
-                    onChanged: (v) => app.command(v ? 'CFAN_ON' : 'CFAN_OFF'),
+                    onChanged: (v) => _guarded(app, v ? 'CFAN_ON' : 'CFAN_OFF'),
                   ),
                 ),
               ]),
@@ -118,7 +136,7 @@ class _ControlsScreenState extends State<ControlsScreen> {
                     label: 'Vent flap',
                     icon: Icons.hvac_outlined,
                     on: app.tel.v('vent') == 1,
-                    onChanged: (_) => app.command('VENT'),
+                    onChanged: (_) => _guarded(app, 'VENT'),
                   ),
                 ),
                 const SizedBox(width: 10),
@@ -127,7 +145,7 @@ class _ControlsScreenState extends State<ControlsScreen> {
                     label: 'Exhaust fan',
                     icon: Icons.air,
                     on: app.tel.v('fan') == 1,
-                    onChanged: (v) => app.command(v ? 'FAN_ON' : 'FAN_OFF'),
+                    onChanged: (v) => _guarded(app, v ? 'FAN_ON' : 'FAN_OFF'),
                   ),
                 ),
               ]),
@@ -138,7 +156,7 @@ class _ControlsScreenState extends State<ControlsScreen> {
                     label: 'Water refill',
                     icon: Icons.water_drop_outlined,
                     level: app.tel.v('hall.water'),
-                    onTap: () => app.command('REFILL_WATER'),
+                    onTap: () => _guarded(app, 'REFILL_WATER'),
                   ),
                 ),
                 const SizedBox(width: 10),
@@ -147,7 +165,7 @@ class _ControlsScreenState extends State<ControlsScreen> {
                     label: 'Food refill',
                     icon: Icons.rice_bowl_outlined,
                     level: app.tel.v('hall.food'),
-                    onTap: () => app.command('REFILL_FOOD'),
+                    onTap: () => _guarded(app, 'REFILL_FOOD'),
                   ),
                 ),
               ]),
@@ -159,7 +177,7 @@ class _ControlsScreenState extends State<ControlsScreen> {
                     icon: Icons.shower_outlined,
                     on: app.tel.v('spr') == 1,
                     onChanged: (v) =>
-                        app.command(v ? 'SPRINKLER_ON' : 'SPRINKLER_OFF'),
+                        _guarded(app, v ? 'SPRINKLER_ON' : 'SPRINKLER_OFF'),
                   ),
                 ),
                 const SizedBox(width: 10),
@@ -429,8 +447,18 @@ class _BenchButton extends StatelessWidget {
 
 /// Disarming needs the user PIN (arming does not) — the app-side auth layer
 /// that AppState.tryDisarm already implements: 3 misses -> 30 s lockout.
+/// What a proven PIN buys.
+enum PinPurpose {
+  /// Lift the night watch.
+  disarm,
+
+  /// Open the remote-control window for [AppState.authWindow].
+  control,
+}
+
 class PinDialog extends StatefulWidget {
-  const PinDialog({super.key});
+  final PinPurpose purpose;
+  const PinDialog({super.key, this.purpose = PinPurpose.disarm});
   @override
   State<PinDialog> createState() => _PinDialogState();
 }
@@ -453,9 +481,14 @@ class _PinDialogState extends State<PinDialog> {
       setState(() => _error = 'Enter the 4-digit PIN');
       return;
     }
-    switch (app.tryDisarm(digits.cast<int>())) {
+    final d = digits.cast<int>();
+    final result = switch (widget.purpose) {
+      PinPurpose.disarm => app.tryDisarm(d),
+      PinPurpose.control => app.authorizeControl(d),
+    };
+    switch (result) {
       case PinResult.ok:
-        Navigator.of(context).pop();
+        Navigator.of(context).pop(true);
       case PinResult.wrong:
         setState(() {
           _error = 'Wrong PIN (${app.pinFails}/3)';
@@ -472,8 +505,19 @@ class _PinDialogState extends State<PinDialog> {
   @override
   Widget build(BuildContext context) => AlertDialog(
         backgroundColor: T.surface,
-        title: const Text('Disarm night watch', style: TextStyle(fontSize: 17)),
+        title: Text(
+            widget.purpose == PinPurpose.disarm
+                ? 'Disarm night watch'
+                : 'Unlock remote control',
+            style: const TextStyle(fontSize: 17)),
         content: Column(mainAxisSize: MainAxisSize.min, children: [
+          if (widget.purpose == PinPurpose.control) ...[
+            Text(
+                'Stays unlocked for ${AppState.authWindow.inSeconds} s, then '
+                'asks again before the next command.',
+                style: Theme.of(context).textTheme.bodySmall),
+            const SizedBox(height: 12),
+          ],
           TextField(
             controller: _ctrl,
             autofocus: true,
@@ -569,5 +613,47 @@ class _ConnectionPanelState extends State<_ConnectionPanel> {
         ),
       ]),
     );
+  }
+}
+
+
+/// Lock state of remote control, at the head of the Farm panel. Visible state
+/// matters here: an operator must be able to see, before reaching for a
+/// switch, whether the next tap will act or ask.
+class _AuthBar extends StatelessWidget {
+  const _AuthBar();
+
+  @override
+  Widget build(BuildContext context) {
+    final app = context.watch<AppState>();
+    final open = app.authorized;
+    final left = app.authSecondsLeft;
+    final color = open ? T.ok : T.sub;
+    return Row(children: [
+      Icon(open ? Icons.lock_open_rounded : Icons.lock_outline_rounded,
+          size: 16, color: color),
+      const SizedBox(width: 8),
+      Expanded(
+        child: Text(
+          open
+              ? 'Remote control unlocked · ${left}s'
+              : 'Remote control locked — PIN before the next command',
+          style: Theme.of(context)
+              .textTheme
+              .bodySmall
+              ?.copyWith(color: color),
+        ),
+      ),
+      if (open)
+        TextButton(
+          onPressed: app.lockControl,
+          style: TextButton.styleFrom(
+              foregroundColor: T.sub,
+              minimumSize: Size.zero,
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+          child: const Text('Lock now', style: TextStyle(fontSize: 12)),
+        ),
+    ]);
   }
 }

@@ -46,10 +46,11 @@ class DefaultFirebaseOptions {
   /// Firebase console; empty means [configured] is false on iOS and the Fleet
   /// tab reads the bridge instead, which is a working path, not a stub.
   static const _ios = FirebaseOptions(
-    apiKey: '',
-    appId: '', // must be 1:199283265474:ios:… , never :web:
+    apiKey: 'AIzaSyAWY581hvEUu2VpYZItYHDXkqlPbKEGMKM',
+    appId: '1:199283265474:ios:9c7b02bfb2dee1ef02505b',
     messagingSenderId: '199283265474',
     projectId: 'bioguard-c75cc',
+    storageBucket: 'bioguard-c75cc.firebasestorage.app',
     iosBundleId: 'com.alp.strajer.strajerApp',
   );
 

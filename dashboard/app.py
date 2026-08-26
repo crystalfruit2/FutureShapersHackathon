@@ -119,6 +119,9 @@ ser = None                # live pyserial handle
 ser_port = None
 ser_stop = threading.Event()
 fake_on = False
+esp_url = None            # Oleksandr's ESP32 sensor board — set by --esp
+esp_live = False
+esp_real = set()          # channels currently fed by the real board
 
 def publish(msg: dict):
     for q in list(subscribers):
@@ -381,7 +384,7 @@ def fake_loop():
         if ser:                       # real serial wins; fake sleeps
             time.sleep(1); continue
         f = fake
-        if "gas" not in f["sim"]:
+        if "gas" not in f["sim"] and "gas" not in esp_real:
             # mean-reverting around ambient: a sealed pit doesn't wander to 500 on its own,
             # and a free random walk would let the analyst forecast a leak that isn't there
             f["gas"] = max(80, f["gas"] + (120 - f["gas"]) * 0.15 + random.uniform(-5, 5))
@@ -389,8 +392,8 @@ def fake_loop():
         # made our own tier-2 analyst flag our own dispatch as "sensor fault or
         # spoofed input" -- the thermal channel is what corroborates the flame
         # pin, so it has to actually move.
-        if "t1" in f["sim"]:
-            pass                      # a SIM-pinned probe (NIST replay) is authoritative
+        if "t1" in f["sim"] or "t1" in esp_real:
+            pass                      # a SIM-pinned probe (NIST replay) or the real board is authoritative
         elif f["flame"]:
             f["t1"] = min(64.0, float(f["t1"]) + random.uniform(1.2, 2.0))
         elif float(f["t1"]) > 25.5:
@@ -418,6 +421,51 @@ def fake_loop():
                        for k in ("gas","nh3","flame","t1","t2","hum","water","food","light","mot","snd","tamp"))
         handle_line(f"TEL|{tel},fan={f['fan']},relay={f['relay']},vent={f['vent']},"
                     f"cfan={f['cfan']},spr={f['spr']},saved_pct={random.randint(60,70)}")
+        time.sleep(1)
+
+# ── real sensor board (Oleksandr's ESP32, WiFi AP "BioGuard") ────────────
+# GET http://192.168.4.1/ → {"gas":0-4095, "temperature":°C|null,
+#                            "humidity":%|null, "water_level":0-4095}
+# The board's FPU is a slug, so raw ADC counts are converted HERE, server
+# side (Oleksandr, 26.08):  gas 0-4095 → 0-1023 a.u. (keeps the 700 critical
+# limit every layer already uses) · water_level 0-4095 → 0-100 %.
+# A null channel means that sensor isn't wired yet — it simply stays
+# simulated, per-key, and takes over automatically the poll it appears.
+# Precedence per channel: SIM-pinned (an operator injection is the sanctioned
+# demo mechanism, incl. the NIST replay) > board > generated.
+
+def esp_convert(j: dict) -> dict:
+    out = {}
+    if j.get("gas") is not None:         out["gas"]   = round(float(j["gas"]) * 1023 / 4095)
+    if j.get("temperature") is not None: out["t1"]    = round(float(j["temperature"]), 1)
+    if j.get("humidity") is not None:    out["hum"]   = round(float(j["humidity"]), 1)
+    if j.get("water_level") is not None: out["water"] = round(float(j["water_level"]) * 100 / 4095)
+    return out
+
+def esp_loop(url: str):
+    global esp_live
+    import urllib.request
+    fails = 0
+    while True:
+        try:
+            with urllib.request.urlopen(url, timeout=2) as r:
+                vals = {k: v for k, v in esp_convert(json.loads(r.read().decode())).items()
+                        if k not in fake["sim"]}
+            fails = 0
+            for k, v in vals.items():
+                fake[k] = v
+            esp_real.clear(); esp_real.update(vals)
+            if not esp_live:
+                esp_live = True
+                handle_line(f"EVT|0|ctrl|BOARD_LINK|{'+'.join(sorted(vals)) or 'none'}|INFO")
+            publish({"type":"esp", "connected":True, "url":url, "channels":sorted(esp_real)})
+        except Exception as e:
+            fails += 1
+            if esp_live and fails >= 3:   # one dropped poll must not flap the demo
+                esp_live = False
+                esp_real.clear()
+                handle_line("EVT|0|ctrl|BOARD_LOST|sim_fallback|WARN")
+                publish({"type":"esp", "connected":False, "url":url, "detail":str(e)[:80]})
         time.sleep(1)
 
 # ── Tier-2 analyst: prediction · baseline drift · plausibility ───────────
@@ -814,7 +862,8 @@ def stream():
                "state":{"mode":state["mode"], "tel":state["tel"]},
                "events":list(events)[-30:], "raws":list(raw_log)[-100:],
                "counters":counters, "ai":analyst.snapshot(),
-               "serial":{"connected":ser is not None, "port":ser_port}})
+               "serial":{"connected":ser is not None, "port":ser_port},
+               "esp":{"connected":esp_live, "url":esp_url, "channels":sorted(esp_real)}})
         try:
             while True:
                 yield f"data: {json.dumps(q.get())}\n\n"
@@ -1057,6 +1106,7 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
  </div>
  <div class="topbar-right">
   <span class="dim" id="stats" style="font-family:var(--mono);font-size:11px"></span>
+  <span id="esppill" class="pill off" style="display:none">board: none</span>
   <span id="serialpill" class="pill off">serial: none</span>
   <a href="/fire" target="_blank" class="navlink">112 DISPATCH</a>
  </div>
@@ -1159,6 +1209,10 @@ function connectSer(){const p=el('ports').value;if(p)fetch('/connect',{method:'P
 function onSerial(s){const p=el('serialpill');
  p.className='pill '+(s.connected?'on':'off');
  p.textContent='serial: '+(s.connected?(s.port||'?'):(s.detail||'none'));}
+function onEsp(s){const p=el('esppill');
+ if(!s.url&&!s.connected){p.style.display='none';return}
+ p.style.display='';p.className='pill '+(s.connected?'on':'off');
+ p.textContent='board: '+(s.connected?'LIVE '+((s.channels||[]).join('+')||'—'):'lost — sim fallback');}
 function onRaw(r){const c=el('console');const d=document.createElement('div');
  d.className=r.ok?r.dir:'bad';
  d.textContent=`${r.t} ${r.dir==='rx'?'←':'→'} ${r.line}${r.ok?'':'   ⟵ UNPARSED'}`;
@@ -1229,10 +1283,11 @@ es.onmessage=ev=>{const m=JSON.parse(ev.data);
  else if(m.type=='log')onLog(m.log);
  else if(m.type=='ai')onAi(m.ai);
  else if(m.type=='serial')onSerial(m);
+ else if(m.type=='esp')onEsp(m);
  else if(m.type=='hello'){el('log').innerHTML='';el('console').innerHTML='';
    onMode(m.state.mode);onTel(m.state.tel||{});
    (m.events||[]).forEach(e=>onEvent(e,true));(m.raws||[]).forEach(onRaw);
-   onCounters(m.counters||{rx:0,tx:0,unparsed:0});onSerial(m.serial||{});
+   onCounters(m.counters||{rx:0,tx:0,unparsed:0});onSerial(m.serial||{});onEsp(m.esp||{});
    if(m.ai)onAi(m.ai);}};
 loadPorts();
 </script></body></html>"""
@@ -1553,6 +1608,9 @@ if __name__ == "__main__":
     ap.add_argument("--baud", type=int, default=115200)
     ap.add_argument("--fake", action="store_true", help="generated data, no hardware")
     ap.add_argument("--pi", help="Raspberry Pi node host/IP — adds socket://<pi>:7777 to the port picker")
+    ap.add_argument("--esp", nargs="?", const="http://192.168.4.1/",
+                    help="poll the real ESP32 sensor board (WiFi AP 'BioGuard', no DHCP — "
+                         "set a static IP first, see README). Default URL http://192.168.4.1/")
     ap.add_argument("--baseline", type=float, default=45.0,
                     help="seconds of normal operation the analyst learns from (venue: 600)")
     ap.add_argument("--host", default="0.0.0.0")
@@ -1562,6 +1620,12 @@ if __name__ == "__main__":
     analyst.baseline_secs = args.baseline
     if args.pi:
         pi_host = args.pi
+    if args.esp:
+        # the board covers 4 channels; the local state machine + generator
+        # carry the rest, so --esp implies the fake loop
+        esp_url = args.esp
+        args.fake = True
+        threading.Thread(target=esp_loop, args=(args.esp,), daemon=True).start()
     if args.fake:
         fake_on = True
         threading.Thread(target=fake_loop, daemon=True).start()

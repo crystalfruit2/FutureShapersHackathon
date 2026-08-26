@@ -70,10 +70,14 @@ brigade 11:00.
 
 **Half two — the camera moves, because now there is someone to follow.** Same barn, same
 fault, same second — but a BioGuard node is on the post. It acts at `02:40:04` (one frame
-of red), the camera pans left to the house, the window pulses twice (the phone; no app UI
-in the film, Alp shows the real notification live), the door opens, and the camera walks
-right with him past the mascot — labelled `BIOGUARD` in world space — to the barn. Doors
-open, animals walk out. Engines arrive last.
+of red), and **0.3 s later the servo slides the barn doors open on their own** — a 0.5 s
+snap, camera still locked on the barn, nobody anywhere in frame (a snap reads as a
+machine, a stroll reads as a person; HUD confirms `DOORS OPENED - AUTOMATIC` after the
+visual). The animals start walking out by themselves. Only then does the camera pan left
+to the house: the window pulses twice (the phone; no app UI in the film, Alp shows the
+real notification live), the door opens, and the camera walks right with the farmer past
+the mascot — labelled `BIOGUARD` in world space — to a barn that is already open and
+already empty. Engines arrive last.
 
 **The engines get ~3 s of screen time but the clock reads `02:58`, not `02:40`.** `/fire`
 quotes ETA ~18 min from Stația Lugoj; a film showing trucks on site 30 s after ignition

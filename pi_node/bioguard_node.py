@@ -29,21 +29,52 @@ Security: every CMD carries a truncated HMAC-SHA256 over "counter|action"
 MACs are rejected ON THIS DEVICE. The audit log stays CRC8-chained (tamper
 evidence, not authentication — same scheme the EEPROM story sells).
 """
-import hashlib, hmac, random, socket, threading, time
+import hashlib, hmac, os, random, socket, threading, time
 
 SECRET = b"STRAJER26"        # must match the bridge
 PORT   = 7777
 TICK   = 1.0                 # seconds per control-loop cycle
 
-# ── SENSOR HOOKS (Oleksandr) ─────────────────────────────────────────────
+# ── SENSOR HOOKS ─────────────────────────────────────────────────────────
+# Oleksandr's sensors arrived as a standalone ESP32 board, not GPIO: it is a
+# WiFi AP "BioGuard" (pw claude_plan, NO DHCP — give this Pi a static IP,
+# e.g. 192.168.4.2/24) serving GET http://192.168.4.1/ →
+#   {"gas":0-4095, "temperature":°C|null, "humidity":%|null, "water_level":0-4095}
+# Raw ADC is converted HERE — the board's FPU is too slow (Oleksandr, 26.08):
+#   gas 0-4095 → 0-1023 a.u. (keeps the 700 critical limit) · water → 0-100 %.
+# A background thread polls at 1 Hz; hooks read the cache and return None for
+# a null/unreachable channel, so it falls back to simulated exactly as before.
+ESP_URL = os.environ.get("BIOGUARD_ESP_URL", "http://192.168.4.1/")   # mock: dashboard/mock_board.py
+_esp = {"vals": {}, "ok": False}
+
+def _esp_poll():
+    import json, urllib.request
+    while True:
+        try:
+            with urllib.request.urlopen(ESP_URL, timeout=2) as r:
+                j = json.loads(r.read().decode())
+            v = {}
+            if j.get("gas") is not None:         v["gas"]   = round(float(j["gas"]) * 1023 / 4095)
+            if j.get("temperature") is not None: v["t1"]    = round(float(j["temperature"]), 1)
+            if j.get("humidity") is not None:    v["hum"]   = round(float(j["humidity"]), 1)
+            if j.get("water_level") is not None: v["water"] = round(float(j["water_level"]) * 100 / 4095)
+            _esp["vals"] = v
+            _esp["ok"] = True
+        except Exception:
+            _esp["vals"] = {}
+            _esp["ok"] = False
+        time.sleep(1)
+
+threading.Thread(target=_esp_poll, daemon=True).start()
+
 # Return a float, or None to keep that channel simulated / SIM-driven.
-def read_gas():   return None   # CH4, manure pit      (a.u., critical 700)
+def read_gas():   return _esp["vals"].get("gas")     # CH4, manure pit (a.u., critical 700)
 def read_nh3():   return None   # NH3, poultry hall    (ppm, limit 25)
 def read_flame(): return None   # flame, feed store    (0/1)
-def read_t1():    return None   # temp 1, hall         (°C)
+def read_t1():    return _esp["vals"].get("t1")      # temp, hall (°C)
 def read_t2():    return None   # temp 2, hall         (°C)
-def read_hum():   return None   # humidity, hall       (%)
-def read_water(): return None   # water level, store   (%)
+def read_hum():   return _esp["vals"].get("hum")     # humidity, hall (%)
+def read_water(): return _esp["vals"].get("water")   # water level, store (%)
 def read_mot():   return None   # motion, perimeter    (0/1)
 def read_snd():   return None   # sound level, hall    (a.u.)
 def read_tamp():  return None   # cabinet tamper       (0/1)

@@ -334,6 +334,7 @@ P2_OFF = 3.2
 # Half two is the only part of the film where the camera moves. Half one is
 # locked and dead; half two follows a human. The contrast is the point.
 H2_ACT   = 1.4                     # the node acts. one frame.
+H2_DOOR  = 1.7                     # the servo fires: barn doors slide open, nobody near them
 H2_PAN   = 2.3                     # start swinging left to the house
 H2_PANE  = 3.3                     # ... arrive
 H2_RUN   = 4.4                     # he is out and moving
@@ -419,8 +420,14 @@ def frame_seq(t):
     elif t2 >= H2_PANE:
         camx = HOUSE_CAM if fx is None else max(HOUSE_CAM, min(CAM[0], fx + 44))
 
-    barn_open = ease(min(1.0, max(0.0, (t2 - H2_RUNE) / 0.8)))
-    animals = min(1.0, max(0.0, (t2 - H2_RUNE - 0.5) / 1.6))
+    # the emergency reflex includes the barn doors: a servo slides them open
+    # 0.3 s after the node acts, while the farmer is still asleep and the
+    # camera is still locked on the barn. Fast (0.5 s) on purpose -- a snap
+    # reads as a machine, a stroll reads as a person. The animals walk out on
+    # their own, so the doors he is running to are ALREADY open and empty of
+    # danger by the time he gets there.
+    barn_open = ease(min(1.0, max(0.0, (t2 - H2_DOOR) / 0.5)))
+    animals = min(1.0, max(0.0, (t2 - H2_DOOR - 0.7) / 1.6))
     truck_x = None
     if t2 >= H2_TRUCK:                            # engines, from the village road
         truck_x = 150 + ease(min(1.0, (t2 - H2_TRUCK) / 2.0)) * 195
@@ -445,6 +452,8 @@ def frame_seq(t):
     # comparison we actually want the jury holding.
     if t2 >= H2_TRUCK:
         clock, sub = "02:58", "BRIGADE ON SITE"
+    elif t2 >= H2_DOOR + 1.7:                 # after the doors have visibly snapped open
+        clock, sub = tc(L), "DOORS OPENED - AUTOMATIC"
     elif acted:
         clock, sub = tc(L), "THE NODE ACTED"
     else:
@@ -452,8 +461,15 @@ def frame_seq(t):
     fr = hud(fr, clock, sub=sub, tag=TAG2, tagcol=TAG2C)
 
     if t >= END:                                         # the closing number
+        # Brigade arrival vs brigade arrival -- the same metric on both nights,
+        # and the numbers the film itself already showed (11:00 card, 02:58
+        # clock). "1 second" was the node's reflex, but a jury does the math on
+        # trucks; ~18 min also matches /fire's own ETA, so the pitch and the
+        # console cannot contradict each other.
         a = min(1.0, (t - END) / 0.7)
-        cd = card([("6 HOURS", 3, 'dng'), ("→", 3, 'dim'), ("1 SECOND", 3, 'ok')], 1.0)
+        cd = card([("FIRE BRIGADE ON SITE", 1, 'dim'),
+                   ("8 HOURS 20 MIN", 3, 'dng'), ("→", 3, 'dim'),
+                   ("18 MINUTES", 3, 'ok')], 1.0)
         fr = Image.blend(fr, cd, min(1.0, a))
     return fr
 
