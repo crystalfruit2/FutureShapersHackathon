@@ -1,0 +1,14 @@
+Based on the standard kit picture here is the list adapted to our farm scenario:
+-Sensors & Input Modules (From Kit) :
+* Sensor Module (Microphone): Detects flock distress or panic noise spikes.
+* Photoresistor (LDR / Light Sensor): Monitors day/night lighting cycles in the poultry hall.
+* Potentiometer: Manual threshold tuning or simulated gas/temperature level adjustment.
+* Keypad (4x4 Matrix) / Push Buttons: Control room interface for manual overrides and system authorization PINs.
+* IR Receiver + Remote Controller: Local manual controls or simulated wireless management.
+-Actuators & Output Modules (From Kit) :
+* DC Motor with Fan Blade (if we have Relay/Driver): Ventilation fan to simulate hall cooling or gas extraction (central to the rejected spoofed "fans off" cyber demo).
+* 5V Single-Channel Relay Module: Switches the ventilation motor, heating element, or drinker pump.
+* Active/Passive Buzzer: Acoustic alarm for system faults, critical levels, or security breaches.
+* Discrete LEDs (Red, Green, Yellow, Blue): Visual indicators for normal operation, critical warnings, and cyber-attack alerts.
+* 16x2 I2C LCD Display: Displays live telemetry (water levels, ambient status, and cyber attack rejection logs).
+* Stepper Motor / Small Geared Motor: Automated feed dispenser valve or mechanical window vent opener.
