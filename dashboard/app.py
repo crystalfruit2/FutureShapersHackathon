@@ -960,6 +960,26 @@ def script():
     threading.Thread(target=_run_script, args=(name,), daemon=True).start()
     return {"ok": True}
 
+@app.route("/reset_demo", methods=["POST"])
+def reset_demo():
+    """One button back to a clean NORMAL stage: release every SIM pin, clear
+    flame/intruder, restore actuators, drop any lockdown, farm to DAY, and reset
+    the 112 dispatch screen. Safe to hit between scenarios; if the real board is
+    live it reclaims its channels on the next poll."""
+    with lock:
+        script_busy["name"] = None
+        fake["sim"] = set(["nh3", "flame"])          # boot default: hand gas/mot/water/t1/hum back
+        fake.update(gas=120, nh3=8, flame=0, t1=24, t2=24, hum=55, water=72,
+                    food=58, mot=0, snd=0, tamp=0,
+                    fan=0, relay=1, vent=0, cfan=0, spr=0, light=1)
+        fake["mode"] = "DAY"; fake.pop("premode", None)
+    if security["lockdown"]:
+        clear_lockdown()
+    handle_line("EVT|0|ctrl|DEMO_RESET|back to normal|INFO")
+    handle_line("EVT|0|pit|GAS_CLEARED|0|INFO")      # resets the /fire dispatch screen (contain())
+    handle_line("STATE|DAY")
+    return {"ok": True}
+
 @app.route("/cmd", methods=["POST"])
 def cmd():
     global cmd_counter
@@ -1154,6 +1174,36 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
  </div>
 </header>
 
+<!-- ── DEMO SCENARIOS · curated jury trigger panel (FutureShapers 2026-08-27) ── -->
+<style>
+ #demoscene .dbtn{display:flex;flex-direction:column;align-items:flex-start;gap:3px;
+   background:#10241a;border:1px solid #1E5C38;border-radius:8px;padding:11px 13px;
+   color:#EAF6EE;font:inherit;text-align:left;cursor:pointer;line-height:1.25;height:100%}
+ #demoscene .dbtn:hover{border-color:#39C07A;background:#123324}
+ #demoscene .dbtn b{font-size:13px;letter-spacing:.02em}
+ #demoscene .dbtn small{font-size:10.5px;color:#8FBBA2;letter-spacing:.01em}
+</style>
+<div id="demoscene" style="margin:14px 18px 0;border:1px solid #1E5C38;border-radius:10px;
+   background:linear-gradient(180deg,#0D2417,#0B1811);padding:14px 16px">
+ <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px">
+  <div style="font-weight:800;letter-spacing:.14em;font-size:12px;color:#7FE0A5">DEMO SCENARIOS · HAND THE JUROR THE PHONE, TRIGGER FROM HERE</div>
+  <div style="font-size:11px;color:#6FBF93">every scenario plays on the phone app too — same live feed</div>
+ </div>
+ <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(232px,1fr));gap:8px;margin-top:12px">
+  <button class="dbtn" onclick="script('gas_ramp')"><b>🟥 GAS LEAK → 112 CALL</b><small>phone: full-screen EMERGENCY takeover · ~18s</small></button>
+  <button class="dbtn" onclick="script('flame')"><b>🔥 FIRE IN STORAGE</b><small>phone: "Fire detected" + sprinkler · ~5s</small></button>
+  <button class="dbtn" onclick="script('night_intruder')"><b>🌙 NIGHT INTRUDER</b><small>phone: full-screen intruder alert · ~5s</small></button>
+  <button class="dbtn" onclick="script('slow_creep')"><b>🧠 AI PREDICTS THE LEAK</b><small>phone: forecast ~60s early, then emergency · ~75s</small></button>
+  <button class="dbtn" onclick="script('nist_smoulder')"><b>📈 REAL NIST FIRE DATA</b><small>phone: heat stays flat, AI+gas catch it · ~90s</small></button>
+  <button class="dbtn" onclick="script('nh3_drift')"><b>💨 AMMONIA DRIFT</b><small>phone: AI flags slow drift, no false alarm · ~90s</small></button>
+ </div>
+ <div style="margin-top:11px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+  <button onclick="resetDemo()" style="font-weight:800;background:#3A2A0C;border:1px solid #C9962F;color:#FFD76A;padding:9px 16px;border-radius:8px;cursor:pointer">■ CLEAR ALL → NORMAL STAGE</button>
+  <button class="acc" onclick="releaseBoard()">↩ hand gas back to the real board</button>
+  <span style="font-size:11px;color:#93A8A0">CLEAR ALL wipes every scenario, alarm and the 112 screen back to a calm day — hit it between scenarios. The lighter button just returns the gas channel to the physical sensor.</span>
+ </div>
+</div>
+
 <div class="row">
  <div class="card" style="flex:2">
   <div class="dim">ENGINEER — FIRMWARE TEST BENCH</div>
@@ -1248,6 +1298,7 @@ const cmd=a=>fetch('/cmd',{method:'POST',headers:H,
  body:JSON.stringify({action:a,role:el('role').value,pin:el('pin').value})});
 const sim=(n,v)=>fetch('/sim',{method:'POST',headers:H,body:JSON.stringify({name:n,value:v})});
 const script=n=>fetch('/script',{method:'POST',headers:H,body:JSON.stringify({name:n,role:el('role').value})});
+const resetDemo=()=>fetch('/reset_demo',{method:'POST',headers:H});
 function sendRawLine(){const i=el('rawline');if(!i.value.trim())return;
  fetch('/raw',{method:'POST',headers:H,body:JSON.stringify({line:i.value})});i.value='';}
 async function loadPorts(){const r=await(await fetch('/ports')).json();

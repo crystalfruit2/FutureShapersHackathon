@@ -578,7 +578,7 @@ class _ConnectionPanelState extends State<_ConnectionPanel> {
           decoration: InputDecoration(
             labelText: 'Bridge address (laptop)',
             labelStyle: const TextStyle(color: T.sub, fontSize: 13),
-            hintText: 'http://192.168.1.20:5001',
+            hintText: 'http://192.168.4.2:5001',
             enabledBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(10),
                 borderSide: const BorderSide(color: T.hairline)),
