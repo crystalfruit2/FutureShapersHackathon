@@ -1,5 +1,9 @@
 # BioGuard (scenario: Ferma Străjer) — FutureShapers Hackathon 2026 (Honeywell, Bucharest)
 
+> 📚 **Full project documentation for juries & visitors:** [`documentation/`](documentation/README.md)
+> — includes [BioGuard-Documentation.pdf](documentation/BioGuard-Documentation.pdf) and screenshots.
+
+
 Smart livestock-facility supervisory node. Arduino UNO R3 + Bitmi kit.
 **25.08 constraint:** the 5 extra sensors (MQ4/MQ135/PIR/flame/tilt) were NOT provided —
 we simulate them (potentiometer + dashboard injection), organizer-sanctioned.
