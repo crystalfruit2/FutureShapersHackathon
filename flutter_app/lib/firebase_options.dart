@@ -9,7 +9,11 @@
 ///
 ///  These are CLIENT-SIDE values and are meant to ship inside the app — an
 ///  apiKey here is a project identifier, not a secret, and grants nothing on
-///  its own. What actually guards the data is the Firestore security rules.
+///  its own. What actually guards the data is the Firestore security rules,
+///  which now live in ../../firestore.rules (added 03.09.2026, after the
+///  project was found still running on hackathon test-mode rules — public
+///  read AND write). GitHub's secret-scanning alerts on the two keys below
+///  are expected and are not a leak.
 ///  The thing that IS secret is the service-account key the bridge uses; it
 ///  lives at ~/.bioguard/service-account.json, outside the repo, and must
 ///  never appear in this file or any other tracked file.

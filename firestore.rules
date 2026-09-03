@@ -1,0 +1,51 @@
+rules_version = '2';
+
+// BioGuard / AgriSentinel — Firestore security rules.
+//
+// Why this file exists (03.09.2026)
+// ---------------------------------
+// The project was created in test mode for the hackathon, which means the
+// default rules were `allow read, write: if request.time < <30 days>` — i.e.
+// ANY caller holding the (public, by design) web API key could read *and*
+// write every document. That was verified from outside the app with a plain
+// unauthenticated REST GET against /farms and /fleet/summary; both returned
+// live data.
+//
+// The Firebase web apiKey in flutter_app/lib/firebase_options.dart is not a
+// secret and never was — it is a project identifier. THIS file is the thing
+// that actually guards the data, which is why the fix lives here and not in
+// a key rotation.
+//
+// Model
+// -----
+// The cloud fleet is demo/portfolio data and the published web build reads it
+// with no sign-in, so read stays open — but only on the two collections the
+// app actually reads, and only for reads. Every write path is closed to
+// clients; the seeder (`python3 -m cloud.seed`) and the Pi bridge write with
+// a service-account credential, which bypasses rules entirely and is
+// unaffected by this file.
+//
+// If the demo is ever retired, replace the two `allow read: if true;` lines
+// with `if false;` — that kills all public access without touching the app.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Per-farm risk documents read by CloudSource.load().
+    match /farms/{farmId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // fleet/regions, fleet/summary, fleet/model — the aggregate docs.
+    match /fleet/{docId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Everything else: no client access at all.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
