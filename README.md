@@ -5,6 +5,8 @@
 
 
 Smart livestock-facility supervisory node. Arduino UNO R3 + Bitmi kit.
+Try the interactive hardware simulation: [BioGuard on Wokwi](https://wokwi.com/projects/473405414143697921).
+
 **25.08 constraint:** the 5 extra sensors (MQ4/MQ135/PIR/flame/tilt) were NOT provided —
 we simulate them (potentiometer + dashboard injection), organizer-sanctioned.
 Substitution map + revised pin map (Plan A′): `docs/implementation-guide.md`.
